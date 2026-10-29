@@ -1,0 +1,31 @@
+[project]
+name = "tnt-lower-mainland"
+version = "0.1.0"
+description = "Scrape, clean, validate and query T&T Supermarket locations in the Lower Mainland"
+authors = [
+    { name = "cynthia cui", email = "cynthiacui98@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=2.3.0",
+    "fastapi>=0.162.0",
+    "httpx>=0.28.1",
+    "playwright>=1.64.1",
+    "psycopg[binary]>=3.3.6",
+    "uvicorn>=0.54.0",
+]
+
+[project.scripts]
+tnt = "tnt.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "tnt"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

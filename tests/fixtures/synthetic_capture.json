@@ -1,0 +1,17 @@
+{
+  "_comment": "SYNTHETIC test fixture. Shape guessed, values invented; not scraped data.",
+  "data": {
+    "storeLocations": {
+      "items": [
+        {"id": "101", "store_name": "Test Store A", "address": "#100 - 1234 Example Road", "city": "Burnaby", "region": "BC", "postcode": "V5H 2E1",
+         "latitude": "49.2270", "longitude": "-123.0000", "store_hours": "Monday – Sunday 9:00 am - 10:00 pm"},
+        {"id": "102", "store_name": "Test Store B", "address": "500 Sample Street", "city": "Burnaby", "region": "BC", "postcode": "",
+         "latitude": "49.2400", "longitude": "-123.0150", "store_hours": "Grand Opening: Oct 8 9am / Store Hours: Mon - Sun, 8am-11pm"},
+        {"id": "103", "store_name": "Test Store C", "address": "77 Placeholder Way", "city": "Coquitlam", "region": "BC", "postcode": "V3B 0A1",
+         "latitude": "49.2780", "longitude": "-122.7990", "store_hours": "Temporarily closed"},
+        {"id": "201", "store_name": "Test Store Ontario", "address": "1 Promenade Circle", "city": "Thornhill", "region": "ON", "postcode": "L4J 4P8",
+         "latitude": "43.8070", "longitude": "-79.4520", "store_hours": "Daily 9am - 10pm"}
+      ]
+    }
+  }
+}
