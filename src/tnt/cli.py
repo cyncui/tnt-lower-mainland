@@ -101,7 +101,7 @@ def cmd_serve(args):
 def main():
     p = argparse.ArgumentParser(prog="tnt")
     sub = p.add_subparsers(required=True)
-    sub.add_parser("scrape", help="load the store locator once and save raw GraphQL").set_defaults(fn=cmd_scrape)
+    sub.add_parser("scrape", help="load the store locator once and save raw JSON responses").set_defaults(fn=cmd_scrape)
     s = sub.add_parser("import", help="import a HAR/JSON saved from your browser")
     s.add_argument("file")
     s.set_defaults(fn=cmd_import)

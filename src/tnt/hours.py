@@ -71,6 +71,9 @@ def parse_hours(text: str) -> ParsedHours:
     if not text:
         return result
 
+    # T&T uses both "\r\n" and "<br />" between the day range and the times.
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+
     # A grand-opening line carries a one-off time ("Oct 8 9am") that is not
     # the weekly schedule. Pull it out first so the range regex can't pair
     # "9am" with the regular hours.
@@ -92,5 +95,5 @@ def parse_hours(text: str) -> ParsedHours:
             result.hours = {day: span for day in DAYS}
 
     if not result.hours:
-        result.notes.append(f"unparsed: {text.strip()}")
+        result.notes.append(f"unparsed: {' '.join(text.split())}")
     return result

@@ -6,12 +6,14 @@ with contact info, and cache results. All three are done here.
 
 import json
 import math
+import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
-from tnt.address import Address
+from tnt.address import SUFFIXES, Address
 
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 USER_AGENT = "tnt-lower-mainland/0.1 (portfolio project; github.com/cyncui/tnt-lower-mainland)"
@@ -27,22 +29,58 @@ def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
+_ORDINAL_WORDS = {"first": "1st", "second": "2nd", "third": "3rd", "fourth": "4th", "fifth": "5th",
+                  "sixth": "6th", "seventh": "7th", "eighth": "8th", "ninth": "9th", "tenth": "10th"}
+_DIRECTION_WORDS = {"e": "East", "w": "West", "n": "North", "s": "South",
+                    "sw": "SW", "se": "SE", "nw": "NW", "ne": "NE"}
+
+
+def geocode_queries(addr: Address) -> list[str]:
+    """Spellings to try, most specific first.
+
+    Tested against Nominatim on the real T&T addresses:
+    "2800 E. First Ave" only matches as "2800 East 1st Avenue", and Surrey's
+    "15277 100th Ave" only as "15277 100 Avenue". The unit and postal code
+    are left out: Nominatim matches civic numbers, not mall units.
+    """
+    words = []
+    for w in (addr.street or "").replace(".", " ").split():
+        lw = w.lower()
+        if lw in _DIRECTION_WORDS and words:  # never the civic number
+            words.append(_DIRECTION_WORDS[lw])
+        elif lw in _ORDINAL_WORDS:
+            words.append(_ORDINAL_WORDS[lw])
+        elif lw in SUFFIXES and words:
+            words.append(SUFFIXES[lw].title())
+        else:
+            words.append(w)
+    # "S W Marine" (from "S.W.") -> "SW Marine"
+    street = re.sub(r"\b(South|North) (East|West)\b", lambda m: m.group(1)[0] + m.group(2)[0], " ".join(words))
+    tail = [p for p in [addr.city, addr.province, "Canada"] if p]
+    first = ", ".join([street, *tail])
+    no_ordinal = ", ".join([re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", r"\1", street), *tail])
+    return [first] if no_ordinal == first else [first, no_ordinal]
+
+
+@dataclass
+class GeoResult:
+    lat: float
+    lng: float
+    # place_rank 30 is a building or point of interest; 26-27 is a whole
+    # street, which Nominatim returns when it can't find the house number.
+    precise: bool
+
+
 class Geocoder:
     def __init__(self, cache_path: Path = CACHE, client: httpx.Client | None = None):
         self.cache_path = cache_path
-        self.cache: dict[str, list[float] | None] = (
-            json.loads(cache_path.read_text()) if cache_path.exists() else {}
-        )
+        self.cache: dict[str, dict | None] = json.loads(cache_path.read_text()) if cache_path.exists() else {}
         self.client = client or httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=20)
         self._last = 0.0
 
-    def geocode(self, addr: Address) -> tuple[float, float] | None:
-        # Units confuse Nominatim, and it matches civic addresses, not mall units.
-        query = ", ".join(p for p in [addr.street, addr.city, addr.province, addr.postal_code, "Canada"] if p)
+    def _lookup(self, query: str) -> dict | None:
         if query in self.cache:
-            hit = self.cache[query]
-            return tuple(hit) if hit else None
-
+            return self.cache[query]
         wait = 1.1 - (time.monotonic() - self._last)
         if wait > 0:
             time.sleep(wait)
@@ -50,14 +88,27 @@ class Geocoder:
         r = self.client.get(NOMINATIM, params={"q": query, "format": "jsonv2", "limit": 1, "countrycodes": "ca"})
         r.raise_for_status()
         results = r.json()
-        hit = [float(results[0]["lat"]), float(results[0]["lon"])] if results else None
+        hit = None
+        if results:
+            top = results[0]
+            hit = {"lat": float(top["lat"]), "lng": float(top["lon"]), "rank": top["place_rank"],
+                   "name": top["display_name"]}
         self.cache[query] = hit
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        self.cache_path.write_text(json.dumps(self.cache, indent=1, sort_keys=True))
-        return tuple(hit) if hit else None
+        self.cache_path.write_text(json.dumps(self.cache, indent=1, sort_keys=True, ensure_ascii=False))
+        return hit
+
+    def geocode(self, addr: Address) -> GeoResult | None:
+        fallback = None
+        for query in geocode_queries(addr):
+            hit = self._lookup(query)
+            if hit and hit["rank"] >= 30:
+                return GeoResult(hit["lat"], hit["lng"], precise=True)
+            fallback = fallback or hit
+        return GeoResult(fallback["lat"], fallback["lng"], precise=False) if fallback else None
 
 
-def validation_flags(addr: Address, site: tuple[float, float] | None, geocoded: tuple[float, float] | None) -> list[str]:
+def validation_flags(addr: Address, site: tuple[float, float] | None, geocoded: GeoResult | None) -> list[str]:
     flags = []
     if not addr.postal_code:
         flags.append("missing_postal_code")
@@ -65,8 +116,12 @@ def validation_flags(addr: Address, site: tuple[float, float] | None, geocoded: 
         flags.append("missing_site_coordinates")
     if geocoded is None:
         flags.append("geocode_failed")
-    if site and geocoded:
-        d = haversine_m(*site, *geocoded)
+    elif not geocoded.precise:
+        # A street-level match says nothing about where on the street the
+        # store is, so comparing distances would only produce noise.
+        flags.append("geocode_street_level")
+    elif site:
+        d = haversine_m(*site, geocoded.lat, geocoded.lng)
         if d > FLAG_DISTANCE_M:
             flags.append(f"geocode_mismatch_{round(d)}m")
     return flags

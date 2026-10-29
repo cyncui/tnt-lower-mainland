@@ -18,8 +18,13 @@ _PROVINCE_RE = re.compile(
     r"(?:,|\s)\s*(" + "|".join(sorted(PROVINCES, key=len, reverse=True)) + r")\.?\s*$", re.IGNORECASE
 )
 
-# Leading "#Y007 -", "Unit 1115,", "Suite 200" or "1000-3700 ..." (unit-civic).
-_UNIT_PREFIX_RE = re.compile(r"^\s*(?:#|unit\s+|suite\s+|ste\.?\s+)([\w-]+?)\s*[-,]?\s+(?=\d)", re.IGNORECASE)
+# Leading "#Y007 -", "#3000-", "Unit 1115,", "Unit #MAJ1," or "Suite 200".
+# The unit is greedy and needs a separator after it: a lazy match plus a
+# digit lookahead would split "#3000-10153" into unit "3".
+_UNIT_PREFIX_RE = re.compile(
+    r"^\s*(?:#\s*|unit\s*#?\s*|suite\s+|ste\.?\s+)(\w+)(?:\s*[-,]\s*|\s+)(?=\d)", re.IGNORECASE
+)
+# "1000-3700 No. 3 Rd": unit-civic, Canada Post's usual form.
 _UNIT_CIVIC_RE = re.compile(r"^\s*(\w+)-(\d+\w?)\s+")
 _UNIT_SUFFIX_RE = re.compile(r",?\s*(?:#|unit\s+|suite\s+)([\w-]+)\s*(?=,|$)", re.IGNORECASE)
 
@@ -47,6 +52,8 @@ class Address:
     city: str | None = None
     province: str | None = None
     postal_code: str | None = None
+    # Text that isn't part of the address proper: "(Keefer & Abbott)", "Upper Level".
+    note: str | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -54,7 +61,16 @@ class Address:
 
 def parse_address(raw: str) -> Address:
     addr = Address()
-    s = " ".join(raw.split())
+    notes = []
+    # T&T separates street and city with two spaces ("147-4800 Kingsway  Burnaby").
+    # Turn that into a comma before collapsing whitespace, or the signal is lost.
+    s = re.sub(r"\s{2,}", ", ", raw.strip())
+    s = " ".join(s.split())
+
+    # Leading cross-street hint: "(100 Ave. & 152 St.)".
+    if m := re.match(r"^\(([^)]*)\)[\s,]*", s):
+        notes.append(m.group(1))
+        s = s[m.end():]
 
     if m := POSTAL_RE.search(s):
         addr.postal_code = f"{m.group(1)} {m.group(2)}".upper()
@@ -76,6 +92,7 @@ def parse_address(raw: str) -> Address:
     parts = [p.strip() for p in s.split(",") if p.strip()]
     if len(parts) >= 2:
         addr.street, addr.city = parts[0], parts[-1]
+        notes += parts[1:-1]  # "Upper Level" between street and city
     elif parts:
         # No comma between street and city: split after the street type.
         m = _STREET_END_RE.match(parts[0])
@@ -83,6 +100,7 @@ def parse_address(raw: str) -> Address:
             addr.street, addr.city = m.group(1), m.group(2)
         else:
             addr.street = parts[0]
+    addr.note = "; ".join(notes) or None
     return addr
 
 

@@ -1,4 +1,9 @@
-"""Capture T&T's store-locator GraphQL responses.
+"""Capture T&T's store-locator JSON responses.
+
+The locator is a plain REST call returning {"code": 200, "data": [...]},
+not GraphQL. Captures keep every JSON response; extract.py finds the
+stores. The Google Maps tile labels on the page are JSONP
+(text/javascript), so they are skipped.
 
 Two ways in, same output (data/raw/<date>.json, the untouched responses):
 - `tnt scrape` loads the page once in Playwright and records network
@@ -28,7 +33,7 @@ def _raw_path(day: date | None = None) -> Path:
 
 def _save(captures: list[dict], source: str) -> Path:
     if not captures:
-        raise RuntimeError("no GraphQL responses captured; nothing saved")
+        raise RuntimeError("no JSON responses captured; nothing saved")
     path = _raw_path()
     path.write_text(json.dumps({"source": source, "captures": captures}, indent=1, ensure_ascii=False))
     return path
@@ -40,7 +45,7 @@ def scrape(postal_prefix: str = "V5K") -> Path:
     captures: list[dict] = []
 
     def on_response(resp):
-        if "graphql" not in resp.url.lower():
+        if "json" not in resp.headers.get("content-type", ""):
             return
         try:
             body = resp.json()
@@ -84,7 +89,7 @@ def import_capture(path: Path) -> Path:
             text = content.get("text")
             if text and content.get("encoding") == "base64":
                 text = base64.b64decode(text).decode()
-            if "graphql" in req["url"].lower() and text:
+            if "json" in content.get("mimeType", "") and text:
                 captures.append({
                     "url": req["url"],
                     "status": resp["status"],

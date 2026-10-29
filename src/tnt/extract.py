@@ -1,9 +1,11 @@
-"""Raw GraphQL captures -> flat store records.
+"""Raw locator captures -> flat store records.
 
-The live response schema hasn't been confirmed (the site blocked automated
-access), so this looks for any list of objects that carry address-like and
-coordinate-like keys, and maps the field names it recognizes. Once a real
-capture exists, replace the candidate lists with the exact paths.
+Confirmed against a browser capture (2026-10-29): the locator returns
+{"code": 200, "data": [{id, name, address, lat, lng, store_hours,
+special_store_hours, ...}]}. The address is one string, with no separate
+city or postal fields. The walker still looks for any list of objects with
+address-like and coordinate-like keys, so a schema change that only renames
+or nests fields keeps working.
 """
 
 import json
@@ -18,6 +20,7 @@ POSTAL_KEYS = ["postcode", "postal_code", "zip", "postal"]
 LAT_KEYS = ["lat", "latitude"]
 LNG_KEYS = ["lng", "lon", "long", "longitude"]
 HOURS_KEYS = ["store_hours", "hours", "opening_hours", "business_hours", "schedule"]
+SPECIAL_HOURS_KEYS = ["special_store_hours", "holiday_hours"]
 SOURCE_ID_KEYS = ["id", "store_id", "store_code", "code", "identifier"]
 
 
@@ -29,6 +32,7 @@ class RawStore:
     hours: str
     lat: float | None
     lng: float | None
+    special_hours: str | None = None
 
 
 def _first(d: dict, keys: list[str]):
@@ -85,11 +89,12 @@ def extract(raw_path: Path) -> list[RawStore]:
             address = ", ".join(p.strip() for p in parts if p.strip())
             store = RawStore(
                 source_id=_text(_first(d, SOURCE_ID_KEYS)) or None,
-                name=_text(_first(d, NAME_KEYS)) or None,
+                name=_text(_first(d, NAME_KEYS)).strip() or None,  # "Lougheed Store "
                 address=address,
                 hours=_text(_first(d, HOURS_KEYS)),
                 lat=_float(_first(d, LAT_KEYS)),
                 lng=_float(_first(d, LNG_KEYS)),
+                special_hours=_text(_first(d, SPECIAL_HOURS_KEYS)).strip() or None,
             )
             # The same store can appear in several captures (page load + search).
             stores[store.source_id or address] = store

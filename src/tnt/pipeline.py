@@ -1,5 +1,6 @@
 """Raw capture -> cleaned, ID'd, validated store records (regex cleaner)."""
 
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -29,6 +30,7 @@ class Store:
     city: str | None
     province: str | None
     postal_code: str | None
+    note: str | None
     raw_address: str
     raw_hours: str
     hours: dict[str, list[str]]
@@ -46,15 +48,21 @@ class Store:
 def clean(raw: RawStore) -> Store:
     addr = parse_address(raw.address)
     hours = parse_hours(raw.hours)
+    notes = hours.notes + ([f"special: {raw.special_hours}"] if raw.special_hours else [])
     return Store(
         store_id=store_id(BRAND, addr), brand=BRAND, name=raw.name, source_id=raw.source_id,
         **addr.as_dict(), raw_address=raw.address, raw_hours=raw.hours,
-        hours=hours.hours, hours_notes=hours.notes, lat=raw.lat, lng=raw.lng,
+        hours=hours.hours, hours_notes=notes, lat=raw.lat, lng=raw.lng,
     )
 
 
+def _municipality(city: str) -> str:
+    # "Township of Langley" -> "langley"
+    return re.sub(r"^(?:township|city|district|corporation) of ", "", city.lower())
+
+
 def in_lower_mainland(s: Store) -> bool:
-    if s.city and s.city.lower() in LOWER_MAINLAND:
+    if s.city and _municipality(s.city) in LOWER_MAINLAND:
         return True
     # No city: fall back to the postal code. Every BC code starts with V, so
     # "V" alone would pull in Victoria and Kelowna; V3-V7 is the Lower Mainland
@@ -66,11 +74,11 @@ def run(raw_path: Path, geocoder: Geocoder | None = None) -> list[Store]:
     stores = [clean(r) for r in extract(raw_path)]
     stores = [s for s in stores if in_lower_mainland(s)]
     for s in stores:
-        addr = Address(s.street, s.unit, s.city, s.province, s.postal_code)
+        addr = Address(s.street, s.unit, s.city, s.province, s.postal_code)  # note not sent to the geocoder
         site = (s.lat, s.lng) if s.lat is not None and s.lng is not None else None
         geo = geocoder.geocode(addr) if geocoder else None
-        if geo:
-            s.geocoded_lat, s.geocoded_lng = geo
+        if geo and geo.precise:
+            s.geocoded_lat, s.geocoded_lng = geo.lat, geo.lng
         s.flags = validation_flags(addr, site, geo) if geocoder else (
             [] if s.postal_code else ["missing_postal_code"]
         )

@@ -8,7 +8,7 @@ from tnt import scrape
 from tnt.address import Address
 from tnt.diff import diff_runs
 from tnt.extract import extract
-from tnt.geocode import haversine_m, validation_flags
+from tnt.geocode import GeoResult, geocode_queries, haversine_m, validation_flags
 from tnt.ids import store_id
 from tnt.pipeline import run
 
@@ -42,15 +42,15 @@ def test_har_import_decodes_base64_bodies(tmp_path, monkeypatch):
     monkeypatch.setattr(scrape, "RAW_DIR", tmp_path / "raw")
     body = base64.b64encode(FIXTURE.read_bytes()).decode()
     har = {"log": {"entries": [
-        {"request": {"url": "https://www.tntsupermarket.com/graphql", "postData": {"text": "{}"}},
-         "response": {"status": 200, "content": {"text": body, "encoding": "base64"}}},
-        {"request": {"url": "https://www.tntsupermarket.com/static/app.js"},
-         "response": {"status": 200, "content": {"text": "x"}}},
+        {"request": {"url": "https://www.tntsupermarket.com/stores", "postData": {"text": "{}"}},
+         "response": {"status": 200, "content": {"text": body, "encoding": "base64", "mimeType": "application/json"}}},
+        {"request": {"url": "https://maps.googleapis.com/maps/vt"},
+         "response": {"status": 200, "content": {"text": "_xdc_._abc && _xdc_._abc([])", "mimeType": "text/javascript"}}},
     ]}}
     har_path = tmp_path / "capture.har"
     har_path.write_text(json.dumps(har))
     saved = scrape.import_capture(har_path)
-    assert len(json.loads(saved.read_text())["captures"]) == 1  # app.js skipped
+    assert len(json.loads(saved.read_text())["captures"]) == 1  # the Maps JSONP is skipped
     assert len(extract(saved)) == 4
 
 
@@ -74,9 +74,27 @@ def test_haversine_known_distance():
 def test_flags_geocode_more_than_200m_away():
     addr = Address("1 Example Road", None, "Burnaby", "BC", "V5H 2E1")
     site = (49.2270, -123.0000)
-    assert validation_flags(addr, site, (49.2271, -123.0001)) == []
-    flags = validation_flags(addr, site, (49.2300, -123.0000))  # ~330 m north
+    assert validation_flags(addr, site, GeoResult(49.2271, -123.0001, True)) == []
+    flags = validation_flags(addr, site, GeoResult(49.2300, -123.0000, True))  # ~330 m north
     assert len(flags) == 1 and flags[0].startswith("geocode_mismatch_")
+
+
+def test_street_level_geocode_is_not_compared():
+    addr = Address("3700 No. 3 Rd", "1000", "Richmond", "BC", "V6X 3X2")
+    # Nominatim's whole-road match for No. 3 Road is 8 km away; that's not a mismatch.
+    flags = validation_flags(addr, (49.1863, -123.1333), GeoResult(49.1110, -123.1350, False))
+    assert flags == ["geocode_street_level"]
+
+
+@pytest.mark.parametrize("street, city, expected", [
+    # The ordinal-free spelling is a fallback, only sent if the first misses.
+    ("2800 E. First Ave", "Vancouver", ["2800 East 1st Avenue, Vancouver, BC, Canada",
+                                         "2800 East 1 Avenue, Vancouver, BC, Canada"]),
+    ("458 S.W. Marine Drive", "Vancouver", ["458 SW Marine Drive, Vancouver, BC, Canada"]),
+    ("15277 100th Ave", "Surrey", ["15277 100th Avenue, Surrey, BC, Canada", "15277 100 Avenue, Surrey, BC, Canada"]),
+])
+def test_geocode_queries_match_what_nominatim_accepts(street, city, expected):
+    assert geocode_queries(Address(street, "1", city, "BC", "V5M 4N8")) == expected
 
 
 def test_diff_runs():
