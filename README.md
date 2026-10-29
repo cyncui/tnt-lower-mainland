@@ -14,6 +14,8 @@ The captured response is in `tests/fixtures/tnt_bc_2026-10-29.json`. It came bac
 
 ## Run it
 
+You need Docker (I use OrbStack on an Apple Silicon Mac; the PostGIS image is amd64 only and runs emulated there) and [uv](https://docs.astral.sh/uv/). I checked these steps in a fresh clone: 71 tests pass with the database up.
+
 ```bash
 docker compose up -d db
 uv sync
@@ -24,7 +26,7 @@ uv run tnt query                      # the three spatial/hours queries
 uv run pytest
 ```
 
-`docker compose up -d` also starts the API on port 8000 (`/stores`, `/stores?flagged=true`, `/stores/nearest?lat=..&lng=..`, `/stores/{id}`). `uv run tnt compare-llm` runs the LLM cleaner next to the regex one and needs `ANTHROPIC_API_KEY`.
+`docker compose up -d` also builds and starts the API on port 8000 (`/stores`, `/stores?flagged=true`, `/stores/nearest?lat=..&lng=..`, `/stores/{id}`, docs at `/docs`). Without a database, the two tests in `tests/test_db.py` skip instead of failing. `uv run tnt compare-llm` runs the LLM cleaner next to the regex one and needs `ANTHROPIC_API_KEY`.
 
 ## Pipeline
 
@@ -154,11 +156,15 @@ A brand-supplied postal code is never overwritten, and the store ID doesn't incl
 
 ## Queries
 
-`sql/queries.sql` has three queries. Docker wasn't available on the machine I built this on, so I haven't run them against PostGIS yet. The answers below were computed in Python from the cleaned data, and the integration tests in `tests/test_db.py` check the SQL once a database is running.
+`sql/queries.sql` has three queries, run with `uv run tnt query`. Results on the 2026-10-29 capture, from PostGIS:
 
-- Nearest store to Coquitlam Centre: Coquitlam Store, about 740 m from the mall's Nominatim point.
-- Stores within 3 km of each other: Yaohan Centre and Lansdowne (1.3 km), and Marine Gateway and Yaohan Centre (2.9 km, across the Fraser River). The second pair is close to the cutoff, where PostGIS's spheroid distance and a spherical formula can disagree by a few meters.
-- Stores open past 10 pm: Metrotown on Friday and Saturday (22:30), Marine Gateway (23:00) and Lansdowne (midnight). Kingsway closes at exactly 22:00 and isn't included.
+| Query | Result |
+|---|---|
+| Nearest store to Coquitlam Centre | Coquitlam, 745 m from the mall's Nominatim point |
+| Stores within 3 km of each other | Yaohan Center and Lansdowne, 1,299 m; Marine Gateway and Yaohan Center, 2,929 m (across the Fraser River) |
+| Stores open past 10 pm | Lansdowne every day (midnight), Marine Gateway every day (23:00), Metrotown Friday and Saturday (22:30) |
+
+Kingsway closes at exactly 22:00 and isn't included. I checked each answer against a separate Python calculation. Python's spherical formula came out 1 to 2 m shorter than PostGIS's spheroid distances, which matters only near a cutoff like the 2,929 m pair.
 
 ## Store IDs and what breaks them
 
