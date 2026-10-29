@@ -19,10 +19,13 @@ JOIN store_locations b
 ORDER BY meters;
 
 -- name: open_past_10pm
--- "Past 10 pm" means closing after 22:00, not at it.
-SELECT s.name, s.city, h.day,
+-- "Past 10 pm" means closing after 22:00, not at it. One row per store and
+-- closing time, with the days it applies to in week order.
+SELECT s.name, s.city,
+       string_agg(h.day, ',' ORDER BY array_position(ARRAY['mon','tue','wed','thu','fri','sat','sun'], h.day)) AS days,
        to_char(make_interval(mins => h.close_min), 'HH24:MI') AS closes
 FROM stores s
 JOIN store_hours h USING (store_id)
 WHERE h.close_min > 22 * 60
-ORDER BY s.name, array_position(ARRAY['mon','tue','wed','thu','fri','sat','sun'], h.day);
+GROUP BY s.name, s.city, h.close_min
+ORDER BY h.close_min DESC, s.name;

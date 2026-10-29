@@ -38,16 +38,18 @@ def conn(monkeypatch):
     conn.execute("CREATE EXTENSION IF NOT EXISTS postgis")
     conn.execute("DROP SCHEMA IF EXISTS test CASCADE; CREATE SCHEMA test; SET search_path = test, public")
     yield conn
+    # Nothing is committed (psycopg keeps one transaction open and
+    # conn.transaction() blocks inside it are savepoints), so a rollback
+    # removes the schema and everything the test wrote.
     conn.rollback()
-    conn.execute("DROP SCHEMA test CASCADE")
-    conn.commit()
     conn.close()
 
 
 def test_first_and_last_seen_survive_out_of_order_loads(conn):
     load(conn, date(2026, 11, 5), [store("a", "A", 49.25, -123.0)])
     load(conn, date(2026, 10, 29), [store("a", "A", 49.25, -123.0), store("b", "B", 49.26, -123.0)])
-    rows = dict(conn.execute("SELECT store_id, (first_seen, last_seen) FROM stores").fetchall())
+    rows = {sid: (first, last) for sid, first, last in
+            conn.execute("SELECT store_id, first_seen, last_seen FROM stores").fetchall()}
     assert rows["a"] == (date(2026, 10, 29), date(2026, 11, 5))
     assert rows["b"] == (date(2026, 10, 29), date(2026, 10, 29))  # gone in the later run
 
@@ -67,4 +69,4 @@ def test_queries_use_meters_and_list_pairs_once(conn):
     assert 1_000 < pairs[0]["meters"] < 1_300
 
     late = db.run_query(conn, "open_past_10pm")
-    assert [(r["name"], r["closes"]) for r in late] == [("Near", "23:00")]
+    assert [(r["name"], r["days"], r["closes"]) for r in late] == [("Near", "mon", "23:00")]
