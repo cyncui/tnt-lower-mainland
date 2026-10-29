@@ -1,0 +1,4 @@
+{
+  "_comment": "Relocations a person confirmed. Each links a new location to the store that left an old one; tnt clean applies them. Add with: uv run tnt link <from loc_> <to loc_> --note '...'",
+  "relocations": []
+}

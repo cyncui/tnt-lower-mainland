@@ -11,11 +11,14 @@ from tnt import api, scrape
 from tnt.pipeline import run
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tnt_bc_2026-10-29.json"
+OCT29, NOV5 = date(2026, 10, 29), date(2026, 11, 5)
 
 
 class FakeConn:
-    def __init__(self, rows):
-        self.rows = rows
+    """Returns the queued result sets in order, and records the SQL it saw."""
+
+    def __init__(self, *results):
+        self.results, self.sql = list(results), []
 
     def __enter__(self):
         return self
@@ -24,10 +27,15 @@ class FakeConn:
         return False
 
     def execute(self, sql, params=None):
+        self.sql.append(sql)
+        self.current = self.results.pop(0) if self.results else []
         return self
 
     def fetchall(self):
-        return self.rows
+        return self.current
+
+    def __iter__(self):
+        return iter(self.current)
 
 
 @pytest.fixture
@@ -36,38 +44,51 @@ def records(tmp_path, monkeypatch):
     return run(scrape.import_capture(FIXTURE)).stores
 
 
-def test_stores_returns_records_with_seen_dates(records, monkeypatch):
-    rows = [(r.model_dump(mode="json"), date(2026, 10, 29), date(2026, 11, 5), True) for r in records]
-    monkeypatch.setattr(api.db, "connect", lambda: FakeConn(rows))
-    body = TestClient(api.app).get("/stores").json()
+def fake(monkeypatch, *results):
+    conn = FakeConn(*results)
+    monkeypatch.setattr(api.db, "connect", lambda: conn)
+    return conn
+
+
+def row(r, active=True, ended=None, *extra):
+    return (r.model_dump(mode="json"), OCT29, NOV5, active, ended, *extra)
+
+
+def test_locations_returns_records_with_seen_dates(records, monkeypatch):
+    fake(monkeypatch, [row(r) for r in records])
+    body = TestClient(api.app).get("/locations").json()
     assert len(body) == 13
-    assert body[0]["address"]["city"] and body[0]["source"]["address"]
-    assert body[0]["first_seen"] == "2026-10-29" and body[0]["last_seen"] == "2026-11-05"
-    assert body[0]["active"] is True
+    assert body[0]["location_id"].startswith("loc_") and body[0]["store_id"].startswith("sto_")
+    assert (body[0]["first_seen"], body[0]["last_seen"], body[0]["active"]) == ("2026-10-29", "2026-11-05", True)
+
+
+def test_locations_hides_ended_unless_asked(monkeypatch):
+    conn = fake(monkeypatch, [], [])
+    client = TestClient(api.app)
+    client.get("/locations")
+    client.get("/locations", params={"include_ended": "true"})
+    assert "WHERE active" in conn.sql[0] and "WHERE" not in conn.sql[1]
 
 
 def test_nearest_adds_meters(records, monkeypatch):
-    rows = [(records[0].model_dump(mode="json"), date(2026, 10, 29), date(2026, 10, 29), True, 742.6)]
-    monkeypatch.setattr(api.db, "connect", lambda: FakeConn(rows))
-    body = TestClient(api.app).get("/stores/nearest", params={"lat": 49.28, "lng": -122.80, "limit": 1}).json()
+    fake(monkeypatch, [row(records[0], True, None, 742.6)])
+    body = TestClient(api.app).get("/locations/nearest", params={"lat": 49.28, "lng": -122.80, "limit": 1}).json()
     assert body[0]["meters"] == 743
 
 
-def test_stores_hides_closed_unless_asked(records, monkeypatch):
-    seen_sql = []
+def test_store_lists_every_place_it_has_been(records, monkeypatch):
+    old, new = records[0], records[1].model_copy(update={"store_id": records[0].store_id})
+    events = [(OCT29, "opened", old.store_id, old.location_id, None),
+              (NOV5, "relocated", old.store_id, new.location_id, old.location_id)]
+    fake(monkeypatch, events, [row(new), row(old, False, "relocated")])  # DB order needn't match
+    body = TestClient(api.app).get(f"/stores/{old.store_id}").json()
+    assert [l["location_id"] for l in body["locations"]] == [old.location_id, new.location_id]
+    assert body["locations"][0]["ended_reason"] == "relocated"
+    assert [e["type"] for e in body["events"]] == ["opened", "relocated"]
 
-    class Recording(FakeConn):
-        def execute(self, sql, params=None):
-            seen_sql.append(sql)
-            return self
 
-    monkeypatch.setattr(api.db, "connect", lambda: Recording([]))
+def test_unknown_ids_are_404(monkeypatch):
+    fake(monkeypatch, [], [])
     client = TestClient(api.app)
-    client.get("/stores")
-    client.get("/stores", params={"include_closed": "true"})
-    assert "WHERE active" in seen_sql[0] and "active" not in seen_sql[1].split("FROM")[1]
-
-
-def test_unknown_store_is_404(monkeypatch):
-    monkeypatch.setattr(api.db, "connect", lambda: FakeConn([]))
-    assert TestClient(api.app).get("/stores/nope").status_code == 404
+    assert client.get("/locations/loc_nope").status_code == 404
+    assert client.get("/stores/sto_nope").status_code == 404

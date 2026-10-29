@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from tnt.address import Address
 from tnt.hours import DAYS
 
-SCHEMA_VERSION = 1
+# v2: store_id split into location_id (a place) and store_id (a brand store).
+SCHEMA_VERSION = 2
 Day = Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 HHMM = Field(pattern=r"^\d{2}:\d{2}$")
 
@@ -58,10 +59,16 @@ class Inferred(BaseModel):
 
 
 class StoreRecord(BaseModel):
-    store_id: str
-    # How this ID was decided: carried over from an earlier run by the brand's
-    # store number or its map pin, or minted from the address hash (resolve.py).
-    matched_by: Literal["store_number", "pin", "new"] = "new"
+    location_id: str = Field(pattern=r"^loc_[0-9a-f]{16}$")  # one place; never moves
+    store_id: str = Field(pattern=r"^sto_[0-9a-f]{16}$")  # one brand store; follows relocations
+    # How the IDs were decided (resolve.py): carried over by the brand's store
+    # number, by map pin, by a person's review decision, or newly minted.
+    matched_by: Literal["store_number", "pin", "review", "new"] = "new"
+    # Set in the run where a store moved: the location it moved from.
+    relocated_from: str | None = None
+    # A new location that may be a store that just disappeared nearby. Not
+    # linked until a person confirms it (review/relocations.json).
+    relocation_candidate: str | None = None
     brand: str
     banner: str  # "T&T Supermarket" or "Osaka"
     name: str  # location only: "Park Royal", not "Osaka – Park Royal Store"
@@ -91,23 +98,47 @@ class Excluded(BaseModel):
     reason: str
 
 
+class Event(BaseModel):
+    run_date: date
+    type: Literal["opened", "closed", "relocated", "reopened"]
+    store_id: str
+    location_id: str  # for "relocated", the new location
+    from_location_id: str | None = None  # for "relocated"
+
+
 class Run(BaseModel):
-    schema_version: Literal[1] = SCHEMA_VERSION
+    schema_version: Literal[2] = SCHEMA_VERSION
     run_date: date
     captured_from: str
     stores: list[StoreRecord]
     excluded: list[Excluded] = []
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_v1(cls, data):
+        # v1 had one store_id per place. It becomes the location_id, and the
+        # store_id is named after it, the same rule a new store gets now. Old
+        # files keep their history connected without being rewritten.
+        if isinstance(data, dict) and data.get("schema_version") == 1:
+            data = {**data, "schema_version": 2, "stores": [
+                {**s, "location_id": "loc_" + s["store_id"], "store_id": "sto_" + s["store_id"]}
+                for s in data["stores"]
+            ]}
+        return data
+
     @model_validator(mode="after")
     def unique_ids(self) -> "Run":
-        # Two stores with one ID would silently overwrite each other in the
-        # database and the diff, so refuse the run instead.
-        seen: dict[str, str] = {}
-        dupes = []
-        for s in self.stores:
-            if s.store_id in seen:
-                dupes.append(f"{s.store_id} ({seen[s.store_id]} / {s.name})")
-            seen[s.store_id] = s.name
-        if dupes:
-            raise ValueError(f"duplicate store IDs: {', '.join(dupes)}")
+        # Two records with one location_id would silently overwrite each other
+        # in the database and the diff, and one brand store can't be in two
+        # places in the same run. Refuse the run instead.
+        for field in ("location_id", "store_id"):
+            seen: dict[str, str] = {}
+            dupes = []
+            for s in self.stores:
+                key = getattr(s, field)
+                if key in seen:
+                    dupes.append(f"{key} ({seen[key]} / {s.name})")
+                seen[key] = s.name
+            if dupes:
+                raise ValueError(f"duplicate {field}s: {', '.join(dupes)}")
         return self

@@ -337,7 +337,13 @@
     },
     "StoreRecord": {
       "properties": {
+        "location_id": {
+          "pattern": "^loc_[0-9a-f]{16}$",
+          "title": "Location Id",
+          "type": "string"
+        },
         "store_id": {
+          "pattern": "^sto_[0-9a-f]{16}$",
           "title": "Store Id",
           "type": "string"
         },
@@ -346,10 +352,35 @@
           "enum": [
             "store_number",
             "pin",
+            "review",
             "new"
           ],
           "title": "Matched By",
           "type": "string"
+        },
+        "relocated_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Relocated From"
+        },
+        "relocation_candidate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Relocation Candidate"
         },
         "brand": {
           "title": "Brand",
@@ -444,6 +475,7 @@
         }
       },
       "required": [
+        "location_id",
         "store_id",
         "brand",
         "banner",
@@ -462,8 +494,8 @@
   },
   "properties": {
     "schema_version": {
-      "const": 1,
-      "default": 1,
+      "const": 2,
+      "default": 2,
       "title": "Schema Version",
       "type": "integer"
     },

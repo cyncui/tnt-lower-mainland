@@ -1,94 +1,152 @@
-"""Stores keep their IDs across runs. Built on the real capture."""
+"""IDs across runs, relocations and the event log, as week-2 scenarios on
+the real 2026-10-29 capture."""
 
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from tnt import scrape
-from tnt.ids import store_id
+from tnt.events import ended_reasons, events
+from tnt.ids import first_store_id, location_id
 from tnt.pipeline import run
-from tnt.resolve import latest_records, resolve_ids
+from tnt.resolve import History, resolve_ids
 from tnt.schema import Point, Run
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tnt_bc_2026-10-29.json"
+WEEK1, WEEK2, WEEK3 = date(2026, 10, 29), date(2026, 11, 5), date(2026, 11, 12)
 
 
 @pytest.fixture
 def week1(tmp_path, monkeypatch):
     monkeypatch.setattr(scrape, "RAW_DIR", tmp_path)
-    return run(scrape.import_capture(FIXTURE)).stores
+    return run(scrape.import_capture(FIXTURE))
 
 
-def by_name(stores, name):
+def named(stores, name):
     return next(s for s in stores if s.name == name)
 
 
-def test_reworded_address_keeps_its_id_by_store_number(week1):
-    yaohan = by_name(week1, "Yaohan Center")
-    # T&T adds the mall name to the street: a rewording the normalizer can't fold.
-    address = replace(yaohan.address, street="3700 No. 3 Road (Yaohan Centre)")
-    new_hash = store_id(yaohan.brand, yaohan.banner, address)
-    assert new_hash != yaohan.store_id
-    reworded = yaohan.model_copy(update={"store_id": new_hash, "address": address})
-    [out] = resolve_ids([reworded], week1)
-    assert (out.store_id, out.matched_by) == (yaohan.store_id, "store_number")
+def rehash(s, **changes):
+    """A week-2 record as clean() would make it: fresh IDs from the (changed) address."""
+    s = s.model_copy(update=changes)
+    loc = location_id(s.brand, s.banner, s.address)
+    return s.model_copy(update={"location_id": loc, "store_id": first_store_id(loc)})
 
 
-def test_renumbered_store_keeps_its_id_by_pin(week1):
-    kingsway = by_name(week1, "Kingsway")
-    moved = kingsway.model_copy(update={
-        "store_id": "fresh-hash",
-        "source": kingsway.source.model_copy(update={"id": "999"}),
-        "location": Point(lat=kingsway.location.lat + 0.0002, lng=kingsway.location.lng),  # ~22 m
-    })
-    [out] = resolve_ids([moved], week1)
-    assert (out.store_id, out.matched_by) == (kingsway.store_id, "pin")
+def moved(s, lat_offset):
+    return Point(lat=s.location.lat + lat_offset, lng=s.location.lng)
 
 
-def test_far_pin_and_new_number_is_a_new_store(week1):
-    kingsway = by_name(week1, "Kingsway")
-    elsewhere = kingsway.model_copy(update={
-        "store_id": "fresh-hash",
-        "source": kingsway.source.model_copy(update={"id": "999"}),
-        "location": Point(lat=kingsway.location.lat + 0.01, lng=kingsway.location.lng),  # ~1.1 km
-    })
-    [out] = resolve_ids([elsewhere], week1)
-    assert (out.store_id, out.matched_by) == ("fresh-hash", "new")
+def week2_with(week1, name, record, decisions=None):
+    """Week 1's stores with `name` replaced by `record` (or dropped if None), resolved."""
+    others = [rehash(s) for s in week1.stores if s.name != name]
+    stores = others + ([record] if record else [])
+    return Run(run_date=WEEK2, captured_from="t", stores=resolve_ids(stores, History.from_runs([week1]), decisions))
 
 
-def test_ambiguous_pin_match_mints_a_new_id(week1):
-    a = by_name(week1, "Kingsway")
-    twin = a.model_copy(update={"store_id": "twin", "source": a.source.model_copy(update={"id": "998"})})
-    newcomer = a.model_copy(update={"store_id": "fresh-hash", "source": a.source.model_copy(update={"id": "999"})})
-    [out] = resolve_ids([newcomer], [a, twin])  # two earlier stores at the same pin
+def test_unchanged_week_keeps_every_id_and_has_no_events(week1):
+    week2 = Run(run_date=WEEK2, captured_from="t",
+                stores=resolve_ids([rehash(s) for s in week1.stores], History.from_runs([week1])))
+    assert {(s.location_id, s.store_id) for s in week2.stores} == {(s.location_id, s.store_id) for s in week1.stores}
+    assert [e for e in events([week1, week2]) if e.run_date == WEEK2] == []
+
+
+def test_reworded_address_is_the_same_place(week1):
+    yaohan = named(week1.stores, "Yaohan Center")
+    reworded = rehash(yaohan, address=replace(yaohan.address, street="3700 No. 3 Road (Yaohan Centre)"))
+    assert reworded.location_id != yaohan.location_id  # the hash alone would re-key it
+    week2 = week2_with(week1, "Yaohan Center", reworded)
+    out = named(week2.stores, "Yaohan Center")
+    assert (out.location_id, out.store_id, out.matched_by) == (yaohan.location_id, yaohan.store_id, "store_number")
+
+
+def test_relocation_keeps_the_store_and_ends_the_old_location(week1):
+    lougheed = named(week1.stores, "Lougheed")
+    new_site = rehash(lougheed, address=replace(lougheed.address, street="9855 Austin Road"),
+                      location=moved(lougheed, 0.02))  # ~2.2 km, same store number
+    week2 = week2_with(week1, "Lougheed", new_site)
+    out = named(week2.stores, "Lougheed")
+    assert out.store_id == lougheed.store_id
+    assert out.location_id != lougheed.location_id
+    assert out.relocated_from == lougheed.location_id and "relocated" in out.flags
+
+    evts = [e for e in events([week1, week2]) if e.run_date == WEEK2]
+    assert [(e.type, e.store_id, e.from_location_id) for e in evts] == [
+        ("relocated", lougheed.store_id, lougheed.location_id)]
+    assert ended_reasons(events([week1, week2])) == {lougheed.location_id: "relocated"}
+
+
+def test_corrected_pin_at_the_same_address_is_not_a_relocation(week1):
+    kingsway = named(week1.stores, "Kingsway")
+    week2 = week2_with(week1, "Kingsway", rehash(kingsway, location=moved(kingsway, 0.005)))  # ~550 m, same address
+    out = named(week2.stores, "Kingsway")
+    assert (out.location_id, out.store_id) == (kingsway.location_id, kingsway.store_id)
+    assert "pin_moved" in out.flags and out.relocated_from is None
+
+
+def test_closure_is_an_event_and_ends_the_location(week1):
+    kingsway = named(week1.stores, "Kingsway")
+    week2 = week2_with(week1, "Kingsway", None)
+    evts = events([week1, week2])
+    assert [(e.type, e.store_id) for e in evts if e.run_date == WEEK2] == [("closed", kingsway.store_id)]
+    assert ended_reasons(evts) == {kingsway.location_id: "closed"}
+
+
+def test_unproven_relocation_is_flagged_not_linked(week1):
+    lougheed = named(week1.stores, "Lougheed")
+    # Same name 2.2 km away, but T&T gave it a new store number: maybe a move.
+    newcomer = rehash(lougheed, address=replace(lougheed.address, street="9855 Austin Road"),
+                      location=moved(lougheed, 0.02), source=lougheed.source.model_copy(update={"id": "77"}))
+    week2 = week2_with(week1, "Lougheed", newcomer)
+    out = named(week2.stores, "Lougheed")
+    assert out.matched_by == "new" and out.store_id != lougheed.store_id
+    assert out.relocation_candidate == lougheed.location_id and "possible_relocation" in out.flags
+    assert {e.type for e in events([week1, week2]) if e.run_date == WEEK2} == {"opened", "closed"}
+
+
+def test_confirmed_relocation_is_linked(week1):
+    lougheed = named(week1.stores, "Lougheed")
+    newcomer = rehash(lougheed, address=replace(lougheed.address, street="9855 Austin Road"),
+                      location=moved(lougheed, 0.02), source=lougheed.source.model_copy(update={"id": "77"}))
+    decisions = {newcomer.location_id: lougheed.location_id}  # what `tnt link` records
+    week2 = week2_with(week1, "Lougheed", newcomer, decisions)
+    out = named(week2.stores, "Lougheed")
+    assert (out.store_id, out.matched_by, out.relocated_from) == (lougheed.store_id, "review", lougheed.location_id)
+    assert [e.type for e in events([week1, week2]) if e.run_date == WEEK2] == ["relocated"]
+
+
+def test_store_that_skips_a_week_reopens_with_its_ids(week1):
+    kingsway = named(week1.stores, "Kingsway")
+    week2 = week2_with(week1, "Kingsway", None)
+    week3 = Run(run_date=WEEK3, captured_from="t",
+                stores=resolve_ids([rehash(s) for s in week1.stores], History.from_runs([week1, week2])))
+    assert named(week3.stores, "Kingsway").location_id == kingsway.location_id
+    evts = events([week1, week2, week3])
+    assert [(e.type, e.store_id) for e in evts if e.run_date == WEEK3] == [("reopened", kingsway.store_id)]
+    assert ended_reasons(evts) == {}
+
+
+def test_pin_match_needs_exactly_one_candidate(week1):
+    kingsway = named(week1.stores, "Kingsway")
+    no_number = kingsway.source.model_copy(update={"id": None})
+    twin = kingsway.model_copy(update={"location_id": "loc_" + "0" * 16, "store_id": "sto_" + "0" * 16,
+                                       "source": no_number})
+    earlier = Run(run_date=WEEK1, captured_from="t", stores=[kingsway.model_copy(update={"source": no_number}), twin])
+    [out] = resolve_ids([rehash(kingsway, source=no_number)], History.from_runs([earlier]))
     assert out.matched_by == "new"
 
 
-def test_each_earlier_store_is_claimed_once(week1):
-    a = by_name(week1, "Kingsway")
-    # Store number goes to the first record; the copy can't take it by pin too.
-    copy = a.model_copy(update={"store_id": "fresh-hash", "source": a.source.model_copy(update={"id": "999"})})
-    out = resolve_ids([a, copy], [a])
-    assert [o.matched_by for o in out] == ["store_number", "new"]
-
-
-def test_whole_second_week_keeps_every_id(week1):
-    week2 = [s.model_copy(update={"store_id": f"rehashed-{i}"}) for i, s in enumerate(week1)]
-    out = resolve_ids(week2, week1)
-    assert [o.store_id for o in out] == [s.store_id for s in week1]
-
-
-def test_latest_records_remembers_stores_that_skipped_a_week(week1):
-    from datetime import date
-    r1 = Run(run_date=date(2026, 10, 29), captured_from="t", stores=week1)
-    r2 = Run(run_date=date(2026, 11, 5), captured_from="t", stores=week1[:12])
-    assert {s.store_id for s in latest_records([r2, r1])} == {s.store_id for s in week1}
+def test_v1_files_migrate_with_their_history():
+    v1 = {"schema_version": 1, "run_date": "2026-10-29", "captured_from": "t", "stores": []}
+    assert Run.model_validate(v1).schema_version == 2
 
 
 def test_run_rejects_duplicate_ids(week1):
-    from datetime import date
-    dup = week1[1].model_copy(update={"store_id": week1[0].store_id})
-    with pytest.raises(ValidationError, match="duplicate store IDs"):
-        Run(run_date=date(2026, 10, 29), captured_from="t", stores=[week1[0], dup])
+    a, b = week1.stores[0], week1.stores[1]
+    with pytest.raises(ValidationError, match="duplicate location_ids"):
+        Run(run_date=WEEK1, captured_from="t", stores=[a, b.model_copy(update={"location_id": a.location_id})])
+    with pytest.raises(ValidationError, match="duplicate store_ids"):
+        Run(run_date=WEEK1, captured_from="t", stores=[a, b.model_copy(update={"store_id": a.store_id})])

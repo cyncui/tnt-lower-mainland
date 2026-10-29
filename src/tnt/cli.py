@@ -1,7 +1,9 @@
 """tnt: scrape -> clean -> load -> query T&T stores in the Lower Mainland."""
 
 import argparse
+import json
 import sys
+from datetime import date
 from datetime import date
 from pathlib import Path
 
@@ -36,37 +38,58 @@ def cmd_import(args):
     print(f"saved {import_capture(Path(args.file))}")
 
 
+def _runs(before: str | None = None) -> list:
+    from tnt.schema import Run
+
+    return [Run.model_validate_json(p.read_text()) for p in sorted(CLEAN_DIR.glob("*.json"))
+            if before is None or p.stem < before]
+
+
 def cmd_clean(args):
     from tnt.geocode import Geocoder
     from tnt.pipeline import run
-    from tnt.resolve import latest_records
-    from tnt.schema import Run
+    from tnt.resolve import History, load_decisions
 
     raw = Path(args.raw) if args.raw else _latest(RAW_DIR)
     # Earlier runs only: re-cleaning a day shouldn't depend on its own last output.
-    earlier = [Run.model_validate_json(p.read_text()) for p in sorted(CLEAN_DIR.glob("*.json")) if p.stem < raw.stem]
-    result = run(raw, None if args.no_geocode else Geocoder(), latest_records(earlier))
+    earlier = _runs(before=raw.stem)
+    result = run(raw, None if args.no_geocode else Geocoder(), History.from_runs(earlier), load_decisions())
     out = _clean_path(raw)
     out.write_text(result.model_dump_json(indent=1) + "\n")
     flagged = [s for s in result.stores if s.flags]
     kept_ids = sum(s.matched_by != "new" for s in result.stores)
     print(f"{len(result.stores)} Lower Mainland stores -> {out} ({len(flagged)} flagged, "
-          f"{kept_ids} kept their ID from {len(earlier)} earlier run(s))")
+          f"{kept_ids} kept their IDs from {len(earlier)} earlier run(s))")
     for s in flagged:
-        print(f"  {s.name}: {', '.join(s.flags)}")
+        extra = f" (candidate: {s.relocation_candidate})" if s.relocation_candidate else ""
+        print(f"  {s.name} {s.location_id}: {', '.join(s.flags)}{extra}")
     for e in result.excluded:
         print(f"  excluded {e.name} ({e.city}): {e.reason}")
 
 
+def cmd_link(args):
+    from tnt.resolve import DECISIONS
+
+    for loc in (args.from_location, args.to_location):
+        if not loc.startswith("loc_"):
+            sys.exit(f"{loc} is not a location_id (loc_...)")
+    data = json.loads(DECISIONS.read_text()) if DECISIONS.exists() else {"relocations": []}
+    if any(d["to"] == args.to_location for d in data["relocations"]):
+        sys.exit(f"{args.to_location} is already linked")
+    data["relocations"].append({"from": args.from_location, "to": args.to_location,
+                                "decided_on": date.today().isoformat(), "note": args.note})
+    DECISIONS.parent.mkdir(parents=True, exist_ok=True)
+    DECISIONS.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    print(f"linked {args.from_location} -> {args.to_location}; run `tnt clean` to apply")
+
+
 def cmd_load(args):
     from tnt import db
-    from tnt.schema import Run
 
-    paths = [Path(p) for p in args.files] or sorted(CLEAN_DIR.glob("*.json"))
+    runs = _runs()
     with db.connect() as conn:
-        for p in paths:
-            db.load(conn, Run.model_validate_json(p.read_text()))
-            print(f"loaded {p}")
+        db.load(conn, runs)
+    print(f"rebuilt the database from {len(runs)} run(s) in {CLEAN_DIR}/")
 
 
 def cmd_query(args):
@@ -82,18 +105,17 @@ def cmd_query(args):
 
 def cmd_diff(args):
     from tnt.diff import diff_runs
-
     from tnt.schema import Run
 
     before, after = (Run.model_validate_json(Path(p).read_text()) for p in (args.before, args.after))
-    d = diff_runs(before.stores, after.stores)
-    print(f"added {len(d.added)}, removed {len(d.removed)}, changed {len(d.changed)}")
-    for sid in d.added:
-        print(f"  + {sid}")
-    for sid in d.removed:
-        print(f"  - {sid}")
-    for sid, fields in d.changed.items():
-        print(f"  ~ {sid}: {', '.join(fields)}")
+    d = diff_runs(before, after)
+    counts = ", ".join(f"{t} {sum(e.type == t for e in d.events)}" for t in ("opened", "closed", "relocated", "reopened"))
+    print(f"{counts}, changed {len(d.changed)}")
+    for e in d.events:
+        moved = f" from {e.from_location_id}" if e.from_location_id else ""
+        print(f"  {e.type} {e.store_id} at {e.location_id}{moved}")
+    for loc, fields in d.changed.items():
+        print(f"  changed {loc}: {', '.join(fields)}")
 
 
 def cmd_compare_llm(args):
@@ -127,9 +149,12 @@ def main():
     s.add_argument("raw", nargs="?")
     s.add_argument("--no-geocode", action="store_true")
     s.set_defaults(fn=cmd_clean)
-    s = sub.add_parser("load", help="load cleaned runs into Postgres")
-    s.add_argument("files", nargs="*")
-    s.set_defaults(fn=cmd_load)
+    sub.add_parser("load", help="rebuild the database from every cleaned run").set_defaults(fn=cmd_load)
+    s = sub.add_parser("link", help="record a relocation a person confirmed")
+    s.add_argument("from_location")
+    s.add_argument("to_location")
+    s.add_argument("--note", default="")
+    s.set_defaults(fn=cmd_link)
     s = sub.add_parser("query", help="run the named SQL queries")
     s.add_argument("name", nargs="?")
     s.set_defaults(fn=cmd_query)

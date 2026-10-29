@@ -1,8 +1,10 @@
-"""Postgres/PostGIS loading.
+"""Postgres/PostGIS: a queryable copy of the cleaned runs.
 
-store_snapshots is an append-only log (one row per store per scrape).
-stores and store_hours are rebuilt from it on every load, so first_seen /
-last_seen are just min/max run_date and loading runs out of order is safe.
+The cleaned runs in data/clean/ are the history. load() drops the tables
+and rebuilds them from every run, so loading is the same however many times
+or in whatever order runs arrive, and schema changes need no migration.
+At much larger scale you'd append runs incrementally instead; with a few
+runs a full rebuild is simpler and can't drift from the files.
 """
 
 import os
@@ -10,6 +12,7 @@ from pathlib import Path
 
 import psycopg
 
+from tnt.events import ended_reasons, events
 from tnt.schema import Run
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://tnt:tnt@localhost:5433/tnt")
@@ -20,42 +23,40 @@ def connect() -> psycopg.Connection:
     return psycopg.connect(DATABASE_URL)
 
 
-def init(conn: psycopg.Connection) -> None:
-    conn.execute((SQL_DIR / "schema.sql").read_text())
-
-
 def _hm(text: str) -> int:
     h, m = text.split(":")
     return int(h) * 60 + int(m)
 
 
-def load(conn: psycopg.Connection, run: Run) -> None:
-    init(conn)
+def load(conn: psycopg.Connection, runs: list[Run]) -> None:
     with conn.transaction():
-        # A run replaces everything stored for its date. Upserting per store
-        # would leave rows behind when re-cleaning a day changes its IDs.
-        conn.execute("DELETE FROM store_snapshots WHERE run_date = %s", (run.run_date,))
-        for r in run.stores:
-            conn.execute(
-                "INSERT INTO store_snapshots (store_id, run_date, record) VALUES (%s, %s, %s)",
-                (r.store_id, run.run_date, r.model_dump_json()),
-            )
-        rebuild(conn)
+        conn.execute((SQL_DIR / "schema.sql").read_text())
+        for run in runs:
+            for r in run.stores:
+                conn.execute("INSERT INTO location_snapshots VALUES (%s, %s, %s)",
+                             (r.location_id, run.run_date, r.model_dump_json()))
+        _rebuild_locations(conn)
+        evts = events(runs)
+        for e in evts:
+            conn.execute("INSERT INTO store_events VALUES (%s, %s, %s, %s, %s)",
+                         (e.run_date, e.type, e.store_id, e.location_id, e.from_location_id))
+        for loc, reason in ended_reasons(evts).items():
+            conn.execute("UPDATE locations SET ended_reason = %s WHERE location_id = %s AND NOT active",
+                         (reason, loc))
 
 
-def rebuild(conn: psycopg.Connection) -> None:
-    conn.execute("TRUNCATE stores CASCADE")
+def _rebuild_locations(conn: psycopg.Connection) -> None:
     conn.execute(
         """
         WITH seen AS (
-            SELECT store_id, min(run_date) AS first_seen, max(run_date) AS last_seen
-            FROM store_snapshots GROUP BY store_id
+            SELECT location_id, min(run_date) AS first_seen, max(run_date) AS last_seen
+            FROM location_snapshots GROUP BY location_id
         ), latest AS (
-            SELECT DISTINCT ON (store_id) store_id, record AS r
-            FROM store_snapshots ORDER BY store_id, run_date DESC
+            SELECT DISTINCT ON (location_id) location_id, record AS r
+            FROM location_snapshots ORDER BY location_id, run_date DESC
         )
-        INSERT INTO stores
-        SELECT l.store_id, r->>'brand', r->>'banner', r->>'name',
+        INSERT INTO locations
+        SELECT l.location_id, r->>'store_id', r->>'brand', r->>'banner', r->>'name',
                r->'address'->>'street', r->'address'->>'unit', r->'address'->>'city',
                r->'address'->>'province', r->'address'->>'postal_code', r->>'phone',
                CASE WHEN jsonb_typeof(r->'location') = 'object'
@@ -64,17 +65,16 @@ def rebuild(conn: psycopg.Connection) -> None:
                     THEN ST_MakePoint((r->'geocode'->>'lng')::float8, (r->'geocode'->>'lat')::float8)::geography END,
                ARRAY(SELECT jsonb_array_elements_text(r->'flags')),
                r, s.first_seen, s.last_seen,
-               s.last_seen = (SELECT max(run_date) FROM store_snapshots)
-        FROM latest l JOIN seen s USING (store_id)
+               s.last_seen = (SELECT max(run_date) FROM location_snapshots),
+               NULL
+        FROM latest l JOIN seen s USING (location_id)
         """
     )
-    rows = conn.execute("SELECT store_id, record->'hours' FROM stores").fetchall()
-    for store_id, hours in rows:
+    rows = conn.execute("SELECT location_id, record->'hours' FROM locations").fetchall()
+    for location_id, hours in rows:
         for day, span in hours.items():
-            conn.execute(
-                "INSERT INTO store_hours VALUES (%s, %s, %s, %s)",
-                (store_id, day, _hm(span["open"]), _hm(span["close"])),
-            )
+            conn.execute("INSERT INTO location_hours VALUES (%s, %s, %s, %s)",
+                         (location_id, day, _hm(span["open"]), _hm(span["close"])))
 
 
 def named_queries() -> dict[str, str]:

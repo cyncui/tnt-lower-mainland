@@ -1,23 +1,24 @@
-"""Hash IDs for stores we have never seen before.
+"""IDs for places and for brand stores.
 
-A new store's ID hashes brand, banner, street, unit, city, province and
-the address note. Each part is normalized first so formatting doesn't
-matter: "E. First Ave" = "East 1st Avenue", "100th" = "100", "0147" = "147",
-"101-T" = "101T", "Township of Langley" = "Langley". The postal code is left
-out, so filling one in or correcting a valid one doesn't change the ID.
+location_id ("loc_..."): one physical place. It never moves. When the
+brand leaves a site, that location ends, whether the store closed or
+relocated. This is the ID to join map or foot-traffic data on.
 
-The hash is only used to mint IDs. A store that was in an earlier run keeps
-the ID it had, matched by the brand's own store number or by its map pin
-(see resolve.py). So a changed address, a renamed street, or a change to this
-normalization re-keys nothing that resolve.py can match.
+store_id ("sto_..."): one brand store. It follows the store through
+relocations and only ends when the store really closes. A new store's
+store_id is named after the first place it was seen (same hex as that
+location_id), which is a label, not a link: after a move the two differ.
 
-What still gives a store a new ID: a change that resolve.py can't match,
-i.e. a new brand store number AND a pin that moved more than 50 m (or two
-earlier stores within 50 m, so the match is ambiguous).
+Both are only minted here for stores never seen before. A store that was in
+an earlier run keeps its IDs through resolve.py.
 
-Banner and note are in the hash so an Osaka and a T&T at one address, or
-stores on different floors of one mall ("Upper Level" / "Lower Level"),
-don't collide. Run rejects any duplicate ID that gets through anyway.
+The location hash covers brand, banner, street, unit, city, province and
+the address note, each normalized first so formatting doesn't matter:
+"E. First Ave" = "East 1st Avenue", "100th" = "100", "0147" = "147",
+"101-T" = "101T", "Township of Langley" = "Langley". The postal code isn't
+hashed. Banner and note are, so an Osaka and a T&T at one address, or
+stores on different floors of one mall, don't collide. Run rejects any
+duplicate that gets through anyway.
 """
 
 import hashlib
@@ -39,14 +40,23 @@ def _unit_key(unit: str | None) -> str:
     return re.sub(r"[-\s]", "", unit or "").lstrip("0").lower()
 
 
-def store_id(brand: str, banner: str, addr: Address) -> str:
-    key = "|".join([
-        _norm(brand),
-        _norm(banner),
+def address_key(addr: Address) -> str:
+    """The normalized address, used for hashing and to tell a relocation
+    (address changed) from a corrected pin (same address)."""
+    return "|".join([
         _street_key(addr.street),
         _unit_key(addr.unit),
         _norm(canonical_city(addr.city)) if addr.city else "",
         _norm(addr.province),
         _norm(addr.note),
     ])
-    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def location_id(brand: str, banner: str, addr: Address) -> str:
+    key = "|".join([_norm(brand), _norm(banner), address_key(addr)])
+    return "loc_" + hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def first_store_id(location_id: str) -> str:
+    """A brand-new store is named after the place it was first seen."""
+    return "sto_" + location_id.removeprefix("loc_")

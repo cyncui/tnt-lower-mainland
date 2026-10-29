@@ -21,12 +21,18 @@ docker compose up -d db
 uv sync
 uv run tnt import tests/fixtures/tnt_bc_2026-10-29.json   # or a HAR you saved
 uv run tnt clean                      # normalize, geocode (Nominatim, 1 req/s, cached), flag
-uv run tnt load                       # every cleaned run in data/clean/ into Postgres
+uv run tnt load                       # rebuild Postgres from every cleaned run in data/clean/
 uv run tnt query                      # the three spatial/hours queries
 uv run pytest
 ```
 
-`docker compose up -d` also builds and starts the API on port 8000 (`/stores`, `/stores?flagged=true`, `/stores/nearest?lat=..&lng=..`, `/stores/{id}`, docs at `/docs`). Without a database, the two tests in `tests/test_db.py` skip instead of failing. `uv run tnt compare-llm` runs the LLM cleaner next to the regex one and needs `ANTHROPIC_API_KEY`.
+`docker compose up -d` also builds and starts the API on port 8000, with docs at `/docs`. The endpoints:
+
+- `/locations`, with `?flagged=true` or `?include_ended=true`
+- `/locations/nearest?lat=..&lng=..`
+- `/locations/{location_id}`
+- `/stores/{store_id}`
+- `/events`, with `?since=` or `?type=` Without a database, the two tests in `tests/test_db.py` skip instead of failing. `uv run tnt compare-llm` runs the LLM cleaner next to the regex one and needs `ANTHROPIC_API_KEY`.
 
 ## Pipeline
 
@@ -35,9 +41,10 @@ uv run pytest
 | Capture | `scrape.py` | `data/raw/<date>.json`, the untouched JSON responses |
 | Extract | `extract.py` | flat records from wherever the store list sits in the response |
 | Clean | `address.py`, `hours.py`, `pipeline.py` | canonical address, E.164 phone, banner and name, hours by weekday |
-| Identify | `resolve.py`, `ids.py` | the store's ID from an earlier run if it matches one, else a new 16-hex hash |
+| Identify | `resolve.py`, `ids.py` | `location_id` and `store_id` carried from earlier runs, relocations detected, else new IDs |
 | Validate | `geocode.py`, `pipeline.py` | geocode and flags, only for stores that pass the Lower Mainland filter |
-| Load | `db.py`, `sql/` | `store_snapshots` log (a run replaces its date), `stores` and `store_hours` rebuilt from it |
+| Events | `events.py` | opened, closed, relocated and reopened, from consecutive runs |
+| Load | `db.py`, `sql/` | Postgres rebuilt from every run: `locations`, `location_hours`, `store_events` |
 | Diff | `diff.py` | added, removed and changed stores between two runs |
 
 Raw data is saved before any parsing, so a parser bug never costs a re-scrape.
@@ -48,8 +55,11 @@ Every stage uses one shape, `StoreRecord` in `src/tnt/schema.py`. The cleaned fi
 
 ```json
 {
-  "store_id": "859a6d5e5a855eb4",
+  "location_id": "loc_859a6d5e5a855eb4",
+  "store_id": "sto_859a6d5e5a855eb4",
   "matched_by": "new",
+  "relocated_from": null,
+  "relocation_candidate": null,
   "brand": "T&T Supermarket",
   "banner": "T&T Supermarket",
   "name": "Coquitlam",
@@ -168,37 +178,69 @@ A brand-supplied postal code is never overwritten, and the store ID doesn't incl
 
 Kingsway closes at exactly 22:00 and isn't included. I checked each answer against a separate Python calculation. Python's spherical formula came out 1 to 2 m shorter than PostGIS's spheroid distances, which matters only near a cutoff like the 2,929 m pair.
 
-## Store IDs and what breaks them
+## Locations, stores and relocations
 
-A store keeps the ID it had in earlier runs. `resolve.py` matches each new record against the latest record of every store from earlier runs, in this order:
+Every record has two IDs:
 
-1. Same brand and the brand's own store number (T&T's `id`, kept as `source.id`).
-2. Otherwise same brand and banner, with T&T's map pin within 50 m, and exactly one earlier store that close.
+- `location_id` (`loc_...`) is one place. It never moves. When T&T leaves a site, that location ends, with `ended_reason` set to `closed` or `relocated`. Map and foot-traffic data should be joined on this one: an ID whose coordinates changed would silently attach old visits to the new site.
+- `store_id` (`sto_...`) is one brand store. It follows the store through a relocation and only ends when the store really closes. Counting a brand's stores, or its openings and closings, uses this one.
 
-Each earlier store can be matched once. `matched_by` on every record says which rule decided its ID: `store_number`, `pin`, or `new`.
+A new store's `store_id` shares its hex with the `location_id` of the place it first opened. That's just a label: after a move the two differ. The prefixes keep anyone from joining one kind of ID to the other by mistake.
 
-Only stores that match nothing get a new ID, a 16-hex SHA-256 of brand, banner, street, unit, city, province and the address note. Each part is normalized first, so "E. First Ave" and "East 1st Avenue", "100th" and "100", "0147" and "147", "101-T" and "101T", and "Township of Langley" and "Langley" all hash the same. The postal code isn't hashed.
+### Matching a run to earlier ones
 
-I tested this against the old IDs. The first cleaned file was made by an earlier version of the ID code. I cleaned the same capture again as a pretend second week, using the current code. All 13 stores kept their old IDs through the store-number rule, and the diff showed nothing added, removed or changed, even though the current hash formula gives every store a different value.
+`resolve.py` matches each new record against the latest record of every location in earlier runs, strongest evidence first:
 
-What still gives a store a new ID:
+| Evidence | Result |
+|---|---|
+| Same T&T store number, pin within 150 m | same place: both IDs carry over |
+| Same store number, pin moved more than 150 m and the address changed | **relocation**: `store_id` carries over, new `location_id`, `relocated_from` set |
+| Same store number, pin moved but the address is the same | T&T corrected its pin: same place, flagged `pin_moved` |
+| No store number match, a single earlier pin within 50 m (same brand and banner) | same place |
+| A pair a person confirmed in `review/relocations.json` | relocation, `matched_by: review` |
+| A same-name store disappeared within 5 km in the previous run | new IDs, flagged `possible_relocation`, with `relocation_candidate` set |
+| Nothing | new store |
 
-- a new brand store number and a pin that moved more than 50 m, which is a relocation or a site rebuild that also moved the pins;
-- a pin match that's ambiguous, with two earlier stores within 50 m;
-- the first run after the hash formula changes, when there's no earlier run to match. That happened once here, to all 13 stores on 2026-10-29, before any history existed.
+`matched_by` on each record says which rule applied. A possible relocation is never linked automatically. A person checks it and records the decision with `uv run tnt link <old loc_> <new loc_> --note "..."`. That writes to `review/relocations.json`, which is committed, so every later `tnt clean` applies it.
 
-What would make two stores share an ID: the same brand, banner, street, unit, city, province and note. The banner and note are in the hash so an Osaka and a T&T at one address, or stores on different floors of one mall, stay apart. If a collision happens anyway, the run fails validation instead of one store silently overwriting the other.
+I ran the whole loop on a pretend second week built from the real capture. Lougheed moved 2.2 km with a new store number, and Kingsway closed:
 
-A malformed postal code like `V5N 2TO` used to end up as the city, which changed the ID and dropped the store from the run. The parser now removes it, records it in `address.issues`, and flags `postal_code_invalid`.
+1. Before review, the diff showed Lougheed as one store opening and another closing, with the old site as the candidate.
+2. After `tnt link`, the diff showed one relocation, with the store keeping its `store_id`, and one closure.
 
-## First seen and last seen
+### The event log
 
-`store_snapshots` gets one row per store per run. Loading a date replaces everything stored for that date, so re-cleaning a day with different IDs leaves nothing behind. `stores.first_seen` and `last_seen` are the min and max `run_date` for each ID, recomputed on every load, and `active` means the store was in the most recent run. The queries and the API's `/stores` only show active stores. `/stores?include_closed=true` shows all of them, and `/stores/{id}` still answers for a closed store, with `active: false`, so an old reference doesn't break. `tnt diff data/clean/A.json data/clean/B.json` lists what changed between two runs.
+`events.py` compares consecutive runs by `store_id`:
+
+| Event | Meaning |
+|---|---|
+| `opened` | a `store_id` seen for the first time |
+| `closed` | in the previous run, missing from this one |
+| `relocated` | the `store_id` is at a different `location_id` than last time |
+| `reopened` | missing from the previous run, back in this one |
+
+The database keeps it as `store_events`, and the API serves it at `/events`. `/stores/{store_id}` lists every place a store has been, in order. `tnt diff A B` prints the events between two runs, plus any field changes at locations present in both.
+
+### What still gives the wrong answer
+
+- A relocation with a new store number and a new name is a closure plus an unrelated opening until a person links it, and nothing flags it.
+- Two earlier locations within 50 m of a new pin make the match ambiguous, so the store gets new IDs.
+- Two stores with the same brand, banner, street, unit, city, province and note would get one `location_id`. The banner and the floor note are hashed to prevent that between an Osaka and a T&T or between floors of one mall. If it still happens, the run fails validation rather than overwriting a store.
+- A new store's first `location_id` is a hash of its normalized address. "E. First Ave" and "East 1st Avenue", "100th" and "100", "0147" and "147", "101-T" and "101T", and "Township of Langley" and "Langley" all hash the same. The postal code isn't part of the hash.
+
+A malformed postal code like `V5N 2TO` used to end up as the city, which changed the ID and dropped the store from the run. The parser now removes it, records it in `address.issues`, and flags `postal_code_invalid`. Stores the Lower Mainland filter drops are listed in each run's `excluded`, so a parse failure can't pass for a closure.
+
+## First seen, last seen and the database
+
+The cleaned runs in `data/clean/` are the history, one file per run. `tnt load` drops the database tables and rebuilds them from every file. That gives the same result however many times it runs or in whatever order the runs arrive, and a schema change needs no migration. `locations.first_seen` and `last_seen` are a location's first and last run, and `active` means it was in the latest run. The queries and `/locations` show active locations only. `/locations?include_ended=true` shows all of them, and `/locations/{id}` still answers for an ended location, with its `ended_reason`, so an old reference doesn't break.
+
+Files from before the location/store split (schema version 1) are migrated when they're read. The old ID becomes the `location_id`, with the same hex, so their history stays connected without the files being rewritten.
 
 ## Bugs caught while building it
 
 I built this with Claude Code and reviewed each diff. These were the bugs it wrote or nearly wrote:
 
+- Matching by store number kept a store's ID however far it moved, so a relocation looked like the same place with a new address. Relocations now get a new `location_id` and keep their `store_id`, and a corrected pin at the same address is told apart from a move.
 - A read-only review of the ID code found several more problems:
   - a malformed postal code became the city and dropped the store;
   - two floors of one mall shared an ID, and any duplicate silently overwrote the other store in the database;
@@ -219,7 +261,7 @@ I built this with Claude Code and reviewed each diff. These were the bugs it wro
 - A HAR import read `content.text` as JSON directly, but DevTools base64-encodes some bodies.
 - A test named "keeps St in saint names" didn't test that case, and `100 St Johns St` came out as `100 street johns street`. "St" now means Saint unless it's the last word or only a direction follows it.
 - `ST_MakePoint` takes longitude first. The schema has a comment about it, and the DB test would catch a swap because the distances would be wrong.
-- The self-join for nearby pairs uses `a.store_id < b.store_id`. With `<>` every pair comes back twice.
+- The self-join for nearby pairs uses `a.location_id < b.location_id`. With `<>` every pair comes back twice.
 - Distances use `geography`. On `geometry(4326)` the same `ST_DWithin(..., 3000)` would mean 3000 degrees.
 
 ## At ChainXY's scale
@@ -230,4 +272,4 @@ ChainXY tracks about 6 million locations across more than 8,000 brands. Most of 
 - Parsing: regex first, because it's cheap and deterministic, and an LLM only for the records regex can't parse. Every LLM output gets validated against a schema, and its disagreements with regex go to human review. Those reviewed cases become test fixtures, the way the T&T capture did here.
 - Geocoding: self-hosted Nominatim or a paid geocoder, since the public one allows 1 request per second. Street-level and shared-address matches (malls) need their own handling, because they produced most of the false flags here.
 - Identity: this repo matches by brand store number, then by pin within 50 m, before hashing. At 8,000 brands that needs name similarity for brands without stable store numbers, a review queue for ambiguous matches, and a way to merge two IDs a person decides are the same store.
-- Change tracking: an incremental merge keyed on `(store_id, run_date)` instead of rebuilding `stores` on each load, with an alert when a brand's store count moves more than expected between runs, since that usually means the scraper broke and not that stores closed.
+- Change tracking: an incremental merge keyed on `(location_id, run_date)` instead of rebuilding the database on each load, with an alert when a brand's store count moves more than expected between runs, since that usually means the scraper broke and not that stores closed.

@@ -15,8 +15,8 @@ from tnt.address import POSTAL_RE, Address, canonical_city, canonical_street, pa
 from tnt.extract import RawStore, extract
 from tnt.geocode import FLAG_DISTANCE_M, GeoResult, Geocoder, haversine_m, validation_flags
 from tnt.hours import parse_hours
-from tnt.ids import store_id
-from tnt.resolve import resolve_ids
+from tnt.ids import first_store_id, location_id
+from tnt.resolve import History, resolve_ids
 from tnt.schema import DayHours, Excluded, Geocode, Inferred, Point, Run, Source, StoreRecord
 
 BRAND = "T&T Supermarket"
@@ -72,8 +72,9 @@ def clean(raw: RawStore) -> StoreRecord:
         flags.append("phone_unparsed")
     if any(i.startswith("invalid postal code") for i in addr.issues):
         flags.append("postal_code_invalid")
+    loc = location_id(BRAND, banner, addr)
     return StoreRecord(
-        store_id=store_id(BRAND, banner, addr), brand=BRAND, banner=banner, name=name, address=addr,
+        location_id=loc, store_id=first_store_id(loc), brand=BRAND, banner=banner, name=name, address=addr,
         phone=e164(raw.phone),
         location=Point(lat=raw.lat, lng=raw.lng) if raw.lat is not None and raw.lng is not None else None,
         geocode=None,
@@ -154,9 +155,10 @@ def validate(r: StoreRecord, geocoder: Geocoder | None) -> StoreRecord:
                                 "inferred": inferred})
 
 
-def run(raw_path: Path, geocoder: Geocoder | None = None, previous: list[StoreRecord] | None = None) -> Run:
-    """previous: the latest record of each store from earlier runs, so stores
-    keep their IDs (resolve.py)."""
+def run(raw_path: Path, geocoder: Geocoder | None = None, history: History | None = None,
+        decisions: dict[str, str] | None = None) -> Run:
+    """history: earlier runs, so stores keep their IDs; decisions: relocations
+    a person confirmed (resolve.py)."""
     raw = json.loads(raw_path.read_text())
     records = [clean(r) for r in extract(raw_path)]
     kept = [validate(r, geocoder) for r in records if in_lower_mainland(r)]
@@ -165,7 +167,7 @@ def run(raw_path: Path, geocoder: Geocoder | None = None, previous: list[StoreRe
                  reason="outside the Lower Mainland" if r.address.city else "no city and no Lower Mainland postal code")
         for r in records if not in_lower_mainland(r)
     ]
-    kept = resolve_ids(kept, previous or [])
+    kept = resolve_ids(kept, history or History([], set()), decisions)
     kept.sort(key=lambda r: (r.address.city or "", r.name))
     return Run(run_date=date.fromisoformat(raw_path.stem), captured_from=raw["source"], stores=kept,
                excluded=excluded)

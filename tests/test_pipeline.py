@@ -11,7 +11,7 @@ from tnt.address import Address, canonical_street
 from tnt.diff import diff_runs
 from tnt.extract import extract
 from tnt.geocode import GeoResult, geocode_queries, haversine_m, validation_flags
-from tnt.ids import store_id
+from tnt.ids import location_id
 from tnt.pipeline import e164, run, split_name
 from tnt.schema import Run
 
@@ -106,14 +106,14 @@ T = "T&T Supermarket"
     (Address("1 Lonsdale Ave", None, "N. Vancouver", "BC"), Address("1 Lonsdale Avenue", None, "North Vancouver", "BC")),
 ])
 def test_store_id_ignores_formatting(a, b):
-    assert store_id(T, T, a) == store_id(T, T, b)
+    assert location_id(T, T, a) == location_id(T, T, b)
 
 
 def test_store_id_separates_units_banners_and_floors():
     base = Address("2200 Park Royal South", None, "West Vancouver", "BC", note="Upper Level")
-    assert store_id(T, T, base) != store_id(T, T, replace(base, unit="1"))
-    assert store_id(T, T, base) != store_id(T, "Osaka", base)
-    assert store_id(T, T, base) != store_id(T, T, replace(base, note="Lower Level"))
+    assert location_id(T, T, base) != location_id(T, T, replace(base, unit="1"))
+    assert location_id(T, T, base) != location_id(T, "Osaka", base)
+    assert location_id(T, T, base) != location_id(T, T, replace(base, note="Lower Level"))
 
 
 def test_haversine_known_distance():
@@ -147,12 +147,12 @@ def test_geocode_queries_match_what_nominatim_accepts(street, city, expected):
     assert geocode_queries(Address(street, "1", city, "BC", "V5M 4N8")) == expected
 
 
-def test_diff_runs(raw):
-    stores = run(raw).stores
-    before = stores[:12]
+def test_diff_reports_events_and_changes(raw):
+    from datetime import date
+    week1 = run(raw)
+    stores = week1.stores
     renamed = stores[1].model_copy(update={"name": "Renamed"})
-    after = [stores[0], renamed, *stores[2:]]
-    d = diff_runs(before, after)
-    assert d.added == [stores[12].store_id]
-    assert d.removed == []
-    assert d.changed == {stores[1].store_id: {"name": (stores[1].name, "Renamed")}}
+    week2 = Run(run_date=date(2026, 11, 5), captured_from="t", stores=[stores[0], renamed, *stores[3:]])
+    d = diff_runs(week1, week2)
+    assert [(e.type, e.store_id) for e in d.events] == [("closed", stores[2].store_id)]
+    assert d.changed == {stores[1].location_id: {"name": (stores[1].name, "Renamed")}}
