@@ -11,12 +11,12 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
-from tnt.address import canonical_street, parse_address
+from tnt.address import POSTAL_RE, Address, canonical_street, parse_address
 from tnt.extract import RawStore, extract
-from tnt.geocode import Geocoder, haversine_m, validation_flags
+from tnt.geocode import FLAG_DISTANCE_M, GeoResult, Geocoder, haversine_m, validation_flags
 from tnt.hours import parse_hours
 from tnt.ids import store_id
-from tnt.schema import DayHours, Geocode, Point, Run, Source, StoreRecord
+from tnt.schema import DayHours, Geocode, Inferred, Point, Run, Source, StoreRecord
 
 BRAND = "T&T Supermarket"
 BANNERS = ["Osaka"]  # T&T's Japanese-format stores, listed as "Osaka – <location> Store"
@@ -87,6 +87,47 @@ def clean(raw: RawStore) -> StoreRecord:
     )
 
 
+def infer_postal_code(addr: Address, site: tuple[float, float] | None, buildings: list[GeoResult],
+                      names: list[str]) -> Inferred | None:
+    """Fill a missing postal code from OSM building matches at the same civic
+    number, within FLAG_DISTANCE_M of the brand's pin.
+
+    1. An OSM point named for the store itself wins. At 19705 Fraser Highway
+       (Willowbrook mall) ten tenants carry three postal codes; a majority
+       vote picks the mall's V3A 4C7, while OSM's T&T node has V3A 7E9.
+    2. Otherwise fill only if every match agrees.
+    3. Otherwise leave it empty and record the candidates for review.
+
+    OSM postal codes can be wrong; Canada Post's AddressComplete is the
+    authoritative source if this ever needs to be exact.
+    """
+    if addr.postal_code or not site or not addr.street:
+        return None
+    civic = addr.street.split(" ", 1)[0]
+    matches = []  # (postal code, place name, metres from the brand's pin)
+    for b in buildings:
+        m = POSTAL_RE.fullmatch((b.postcode or "").strip())
+        d = round(haversine_m(*site, b.lat, b.lng))
+        if m and b.civic == civic and d <= FLAG_DISTANCE_M:
+            matches.append((f"{m.group(1)} {m.group(2)}".upper(), b.matched.split(",")[0], d))
+    if not matches:
+        return None
+
+    candidates = sorted({code for code, _, _ in matches})
+    own = [(code, place, d) for code, place, d in matches if any(n.lower() in place.lower() for n in names)]
+    if len({code for code, _, _ in own}) == 1:
+        code, place, d = own[0]
+        value, evidence = code, f"OSM point '{place}' at civic {civic}, {d} m from the brand's pin"
+    elif len(candidates) == 1:
+        value, evidence = candidates[0], f"all {len(matches)} OSM buildings at civic {civic} agree"
+    else:
+        value = None
+        evidence = f"{len(matches)} OSM buildings at civic {civic} disagree: " + "; ".join(
+            f"{place} {code}" for code, place, _ in matches)
+    return Inferred(field="address.postal_code", value=value, candidates=candidates,
+                    source="OpenStreetMap via Nominatim (ODbL)", evidence=evidence)
+
+
 def validate(r: StoreRecord, geocoder: Geocoder | None) -> StoreRecord:
     site = (r.location.lat, r.location.lng) if r.location else None
     geo = geocoder.geocode(r.address) if geocoder else None
@@ -95,11 +136,24 @@ def validate(r: StoreRecord, geocoder: Geocoder | None) -> StoreRecord:
         distance = round(haversine_m(*site, geo.lat, geo.lng)) if site and geo.precise else None
         geocode = Geocode(lat=geo.lat, lng=geo.lng, precision="building" if geo.precise else "street",
                           distance_m=distance, matched=geo.matched)
+    addr, inferred = r.address, []
+    if geocoder and not addr.postal_code:
+        # OSM names the Langley store "大統華 T&T Supermarket", so match on "T&T", plus the banner (Osaka).
+        names = sorted({"T&T", r.banner} - {BRAND})
+        if found := infer_postal_code(addr, site, geocoder.buildings_at(addr), names):
+            inferred = [found]
+            if found.value:
+                addr = replace(addr, postal_code=found.value)
+
     if geocoder:
-        flags = validation_flags(r.address, site, geo)
+        flags = validation_flags(addr, site, geo)
     else:
-        flags = [] if r.address.postal_code else ["missing_postal_code"]
-    return r.model_copy(update={"geocode": geocode, "flags": flags + r.flags})
+        flags = [] if addr.postal_code else ["missing_postal_code"]
+    if inferred:
+        # Inferred values still get a human glance; ambiguous ones need one.
+        flags.append("postal_code_inferred" if inferred[0].value else "postal_code_ambiguous")
+    return r.model_copy(update={"address": addr, "geocode": geocode, "flags": flags + r.flags,
+                                "inferred": inferred})
 
 
 def run(raw_path: Path, geocoder: Geocoder | None = None) -> Run:

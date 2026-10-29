@@ -75,6 +75,7 @@ The rules each field follows:
 - `phone` is E.164. T&T writes both `604.945.3818` and `604-519-8678`.
 - `hours` keys are always in week order, Monday first, whatever order the source used.
 - `location` is T&T's own pin. `geocode` is Nominatim's, with `precision` and the distance between the two.
+- `inferred` lists any value we filled in that T&T didn't publish, with its source, the candidates and the evidence. The filled value also goes into the field itself, so consumers don't need to look here, but they can.
 - `source` keeps every string exactly as published, so a parser fix can be re-run from the record alone.
 
 ## What was messy
@@ -108,8 +109,8 @@ Four of 13 stores:
 
 | Store | Flag | Why |
 |---|---|---|
-| Coquitlam | `geocode_mismatch_710m` | Coquitlam Centre shares civic number 2929 across the whole mall. Nominatim's house-level match is a restaurant at the other end. Needs a person to check. |
-| Langley | `missing_postal_code` | T&T lists no postal code. |
+| Coquitlam | `geocode_mismatch_827m` | Coquitlam Centre shares civic number 2929 across the whole mall. Nominatim's building match is another tenant, and which one comes first changes between requests (710 m one run, 827 m the next). Needs a person to check. |
+| Langley | `postal_code_inferred` | T&T lists no postal code. It was filled with V3A 7E9 from OpenStreetMap; see below. |
 | Park Royal | `geocode_street_level` | OSM has no house number for 2200 Park Royal South, only the road. |
 | Yaohan Centre | `geocode_street_level` | Same for 3700 No. 3 Road. The road match is a fishing pier 8 km south. |
 
@@ -128,11 +129,28 @@ All other flags:
 | Flag | Meaning |
 |---|---|
 | `geocode_failed` | Nominatim found nothing for any spelling |
+| `missing_postal_code` | no postal code from the brand, and none could be inferred |
+| `postal_code_inferred` | the postal code came from OpenStreetMap, not the brand; details in `inferred` |
+| `postal_code_ambiguous` | OSM had several postal codes at the address and none named for the store; candidates in `inferred` |
 | `missing_site_coordinates` | the brand's record has no lat/lng |
 | `hours_unparsed` | no weekly hours could be read; the raw text is kept |
 | `lower_mainland_by_postal_code` | no city, included because the postal code starts with V3 to V7 |
 
 The postal code pattern rejects D, F, I, O, Q and U, which Canada Post never uses, and W or Z as the first letter.
+
+## Filling missing postal codes
+
+Langley is the only store without a postal code. I didn't search Google for it: Google's terms forbid automated searches, its results pages block bots the same way T&T's site does, and the Places API terms restrict storing what it returns. OpenStreetMap data is under the ODbL, which allows storing it with attribution, and the pipeline already asks Nominatim about each store.
+
+The first attempt took the postal code from the top geocode result. That turned out to depend on Nominatim's ranking. The same query for 19705 Fraser Highway returned Willowbrook Shopping Centre (V3A 4C7) once and a Bell store in suite 442 (V3A 7E9) the next time. Willowbrook is a mall, and the ten OSM buildings at that civic number carry three postal codes.
+
+`infer_postal_code` now looks at every building-level match at the same civic number, within 200 m of T&T's pin:
+
+1. An OSM point named for the store wins. OSM has `大統華 T&T Supermarket` at 19705 Fraser Highway with V3A 7E9. A majority vote would have picked V3A 4C7, which is the mall's main code, not the store's.
+2. Otherwise the code is filled only if every match agrees.
+3. Otherwise it stays empty, flagged `postal_code_ambiguous`, with the candidates listed.
+
+A brand-supplied postal code is never overwritten, and the store ID doesn't include the postal code, so filling one in doesn't re-key the store. OSM's T&T point is 199 m from T&T's own pin, just inside the limit. The answer is likely right but not certain. Canada Post's AddressComplete is the authoritative source if it needs to be.
 
 ## Queries
 
@@ -166,6 +184,7 @@ I built this with Claude Code and reviewed each diff. These were the bugs it wro
 - The unit pattern was lazy with a digit lookahead, which would have read `#3000-10153` as unit "3".
 - It filtered captures on "graphql" in the URL, an assumption the real site didn't match.
 - It treated any Nominatim result as a location, including street-level fallbacks 8 to 13 km away.
+- The first postal code inference used Nominatim's top result, which changes between requests. It only avoided writing a wrong code because that run's top result had "Suite 442" in its house number. A majority vote over all results would have been wrong too, picking the mall's postal code instead of the store's.
 - It wrote the Coquitlam Centre coordinates from memory and they were about 320 m off. They now come from Nominatim, with the date in a comment.
 - The Lower Mainland fallback accepted any postal code starting with V, which also covers Victoria and Kelowna.
 - A HAR import read `content.text` as JSON directly, but DevTools base64-encodes some bodies.

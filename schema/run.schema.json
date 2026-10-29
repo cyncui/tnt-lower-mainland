@@ -146,6 +146,50 @@
       "title": "Geocode",
       "type": "object"
     },
+    "Inferred": {
+      "description": "A value the brand didn't publish that we tried to fill in.\n\nvalue is None when the sources disagreed; candidates lists what they said.",
+      "properties": {
+        "field": {
+          "title": "Field",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        },
+        "candidates": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Candidates",
+          "type": "array"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "evidence": {
+          "title": "Evidence",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "value",
+        "candidates",
+        "source",
+        "evidence"
+      ],
+      "title": "Inferred",
+      "type": "object"
+    },
     "Point": {
       "properties": {
         "lat": {
@@ -318,6 +362,14 @@
             "type": "string"
           },
           "title": "Flags",
+          "type": "array"
+        },
+        "inferred": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Inferred"
+          },
+          "title": "Inferred",
           "type": "array"
         },
         "source": {

@@ -44,6 +44,19 @@ class Source(BaseModel):
     special_hours: str | None
 
 
+class Inferred(BaseModel):
+    """A value the brand didn't publish that we tried to fill in.
+
+    value is None when the sources disagreed; candidates lists what they said.
+    """
+
+    field: str  # dotted path, e.g. "address.postal_code"
+    value: str | None
+    candidates: list[str]
+    source: str
+    evidence: str
+
+
 class StoreRecord(BaseModel):
     store_id: str
     brand: str
@@ -56,6 +69,7 @@ class StoreRecord(BaseModel):
     hours: dict[Day, DayHours]
     hours_notes: list[str]
     flags: list[str]
+    inferred: list[Inferred] = []
     source: Source
 
     @field_validator("hours")

@@ -53,6 +53,14 @@ class GeoResult:
     # street, which Nominatim returns when it can't find the house number.
     precise: bool
     matched: str = ""
+    # From Nominatim's addressdetails, for the postal code inference.
+    house_number: str | None = None
+    postcode: str | None = None
+
+    @property
+    def civic(self) -> str | None:
+        # "19705, Suite 442" -> "19705"
+        return self.house_number.split(",")[0].strip() if self.house_number else None
 
 
 class Geocoder:
@@ -62,34 +70,46 @@ class Geocoder:
         self.client = client or httpx.Client(headers={"User-Agent": USER_AGENT}, timeout=20)
         self._last = 0.0
 
-    def _lookup(self, query: str) -> dict | None:
-        if query in self.cache:
-            return self.cache[query]
+    def _search(self, query: str, limit: int = 1) -> list[dict]:
+        key = f"{limit}|{query}"
+        if key in self.cache:
+            return self.cache[key]
         wait = 1.1 - (time.monotonic() - self._last)
         if wait > 0:
             time.sleep(wait)
         self._last = time.monotonic()
-        r = self.client.get(NOMINATIM, params={"q": query, "format": "jsonv2", "limit": 1, "countrycodes": "ca"})
+        r = self.client.get(NOMINATIM, params={"q": query, "format": "jsonv2", "limit": limit, "countrycodes": "ca",
+                                               "addressdetails": 1})
         r.raise_for_status()
-        results = r.json()
-        hit = None
-        if results:
-            top = results[0]
-            hit = {"lat": float(top["lat"]), "lng": float(top["lon"]), "rank": top["place_rank"],
-                   "name": top["display_name"]}
-        self.cache[query] = hit
+        hits = []
+        for top in r.json():
+            details = top.get("address", {})
+            hits.append({"lat": float(top["lat"]), "lng": float(top["lon"]), "rank": top["place_rank"],
+                         "name": top["display_name"], "house_number": details.get("house_number"),
+                         "postcode": details.get("postcode")})
+        self.cache[key] = hits
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         self.cache_path.write_text(json.dumps(self.cache, indent=1, sort_keys=True, ensure_ascii=False))
-        return hit
+        return hits
 
     def geocode(self, addr: Address) -> GeoResult | None:
         fallback = None
         for query in geocode_queries(addr):
-            hit = self._lookup(query)
-            if hit and hit["rank"] >= 30:
-                return GeoResult(hit["lat"], hit["lng"], precise=True, matched=hit["name"])
-            fallback = fallback or hit
-        return GeoResult(fallback["lat"], fallback["lng"], False, fallback["name"]) if fallback else None
+            hits = self._search(query)
+            if hits and hits[0]["rank"] >= 30:
+                return _result(hits[0], precise=True)
+            fallback = fallback or (hits[0] if hits else None)
+        return _result(fallback, precise=False) if fallback else None
+
+    def buildings_at(self, addr: Address, limit: int = 10) -> list[GeoResult]:
+        """Every building-level match at the address. A mall can return several
+        tenants at one civic number, each with its own postal code, and which one
+        Nominatim ranks first changes between requests."""
+        return [_result(h, precise=True) for h in self._search(geocode_queries(addr)[0], limit) if h["rank"] >= 30]
+
+
+def _result(hit: dict, precise: bool) -> GeoResult:
+    return GeoResult(hit["lat"], hit["lng"], precise, hit["name"], hit["house_number"], hit["postcode"])
 
 
 def validation_flags(addr: Address, site: tuple[float, float] | None, geocoded: GeoResult | None) -> list[str]:
