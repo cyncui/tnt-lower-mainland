@@ -1,6 +1,6 @@
 import pytest
 
-from tnt.address import Address, normalize_street, parse_address
+from tnt.address import Address, canonical_street, parse_address
 
 
 @pytest.mark.parametrize(
@@ -36,11 +36,18 @@ def test_postal_code_rejects_letters_canada_post_never_uses():
     assert parse_address("123 Main St, Vancouver, BC D5K 1O2").postal_code is None
 
 
-def test_normalize_street_expands_abbreviations():
-    assert normalize_street("1800 Sheppard Ave. E") == normalize_street("1800 Sheppard Avenue East")
-    assert normalize_street("2800 E 1st Ave") == "2800 east 1st avenue"
-
-
-@pytest.mark.xfail(reason="'St' as Saint vs Street needs position-aware rules; known gap")
-def test_normalize_street_saint_prefix():
-    assert normalize_street("100 St Johns St") == "100 saint johns street"
+@pytest.mark.parametrize("raw, canonical", [
+    ("1800 Sheppard Ave. E", "1800 Sheppard Avenue East"),
+    ("2800 E. First Ave", "2800 East 1st Avenue"),
+    ("2800 E 1st Ave", "2800 East 1st Avenue"),
+    ("458 S.W. Marine Drive", "458 SW Marine Drive"),
+    ("3700 No. 3 Rd", "3700 No. 3 Road"),
+    ("19705 Fraser HWY", "19705 Fraser Highway"),
+    ("15277 100th Ave", "15277 100th Avenue"),
+    ("4800 Kingsway", "4800 Kingsway"),
+    ("26 Edward St", "26 Edward Street"),
+    ("100 St Johns St", "100 Saint Johns Street"),
+    ("50 Main St E", "50 Main Street East"),
+])
+def test_canonical_street(raw, canonical):
+    assert canonical_street(raw) == canonical

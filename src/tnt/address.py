@@ -108,15 +108,39 @@ def _is_direction_only(text: str) -> bool:
     return text.lower().strip(".") in DIRECTIONS
 
 
-def normalize_street(street: str) -> str:
-    """Canonical form for comparison and hashing: '1800 Sheppard Ave. E' -> '1800 sheppard avenue east'."""
-    words = re.sub(r"[.,#]", " ", street.lower()).split()
+ORDINAL_WORDS = {"first": "1st", "second": "2nd", "third": "3rd", "fourth": "4th", "fifth": "5th",
+                 "sixth": "6th", "seventh": "7th", "eighth": "8th", "ninth": "9th", "tenth": "10th"}
+
+
+def canonical_street(street: str) -> str:
+    """One spelling per street, used for display, IDs and geocoding.
+
+    Full words in title case: '2800 E. First Ave' -> '2800 East 1st Avenue',
+    '458 S.W. Marine Drive' -> '458 SW Marine Drive', '3700 No. 3 Rd' ->
+    '3700 No. 3 Road'. Nominatim matched every T&T address in this form.
+    """
+    s = re.sub(r"\b([NS])\.\s?([EW])\.", r"\1\2", street, flags=re.IGNORECASE)  # S.W. -> SW
+    s = re.sub(r"\bno\.?\s*(?=\d)", "No. ", s, flags=re.IGNORECASE)  # No 3 / No.3 -> No. 3
+    words = s.replace(",", " ").split()
     out = []
     for i, w in enumerate(words):
-        if w in SUFFIXES and i > 0:
-            out.append(SUFFIXES[w])
-        elif w in DIRECTIONS and i > 0 and (i == len(words) - 1 or i == 1):
-            out.append(DIRECTIONS[w])
-        else:
+        lw = w.lower().rstrip(".")
+        if i == 0:
+            out.append(w.upper())  # civic number, e.g. "15277"
+        elif lw in ("ne", "nw", "se", "sw"):
+            out.append(lw.upper())
+        elif lw in DIRECTIONS and (i == 1 or i == len(words) - 1):
+            out.append(DIRECTIONS[lw].title())
+        elif lw == "st" and not all(r.lower().rstrip(".") in DIRECTIONS for r in words[i + 1:]):
+            out.append("Saint")  # "St Johns St": a name follows, so not the street type
+        elif lw in ORDINAL_WORDS:
+            out.append(ORDINAL_WORDS[lw])
+        elif lw in SUFFIXES:
+            out.append(SUFFIXES[lw].title())
+        elif w == "No.":
             out.append(w)
+        elif re.fullmatch(r"\d+(st|nd|rd|th)", lw):
+            out.append(lw)  # "100th", not "100Th"
+        else:
+            out.append(w[0].upper() + w[1:].lower() if w.isupper() and len(w) > 1 else w[0].upper() + w[1:])
     return " ".join(out)

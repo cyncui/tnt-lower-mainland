@@ -6,6 +6,8 @@ import psycopg
 import pytest
 
 from tnt import db
+from tnt.address import Address
+from tnt.schema import DayHours, Point, Run, Source, StoreRecord
 
 
 def _connect():
@@ -16,12 +18,17 @@ def _connect():
 
 
 def store(sid, name, lat, lng, close="22:00"):
-    return {
-        "store_id": sid, "brand": "T&T Supermarket", "name": name, "street": "1 Test Rd", "unit": None,
-        "city": "Burnaby", "province": "BC", "postal_code": None, "raw_address": "x", "raw_hours": "x",
-        "hours": {"mon": ["09:00", close]}, "lat": lat, "lng": lng,
-        "geocoded_lat": None, "geocoded_lng": None, "flags": [],
-    }
+    return StoreRecord(
+        store_id=sid, brand="T&T Supermarket", banner="T&T Supermarket", name=name,
+        address=Address("1 Test Road", None, "Burnaby", "BC", None), phone=None,
+        location=Point(lat=lat, lng=lng), geocode=None,
+        hours={"mon": DayHours(open="09:00", close=close)}, hours_notes=[], flags=[],
+        source=Source(id=sid, name=name, address="x", phone=None, hours="x", special_hours=None),
+    )
+
+
+def load(conn, run_date, stores):
+    db.load(conn, Run(run_date=run_date, captured_from="test", stores=stores))
 
 
 @pytest.fixture
@@ -38,19 +45,19 @@ def conn(monkeypatch):
 
 
 def test_first_and_last_seen_survive_out_of_order_loads(conn):
-    db.load(conn, [store("a", "A", 49.25, -123.0)], date(2026, 11, 5))
-    db.load(conn, [store("a", "A", 49.25, -123.0), store("b", "B", 49.26, -123.0)], date(2026, 10, 29))
+    load(conn, date(2026, 11, 5), [store("a", "A", 49.25, -123.0)])
+    load(conn, date(2026, 10, 29), [store("a", "A", 49.25, -123.0), store("b", "B", 49.26, -123.0)])
     rows = dict(conn.execute("SELECT store_id, (first_seen, last_seen) FROM stores").fetchall())
     assert rows["a"] == (date(2026, 10, 29), date(2026, 11, 5))
     assert rows["b"] == (date(2026, 10, 29), date(2026, 10, 29))  # gone in the later run
 
 
 def test_queries_use_meters_and_list_pairs_once(conn):
-    db.load(conn, [
+    load(conn, date(2026, 10, 29), [
         store("a", "Near", 49.2798, -122.7986, close="23:00"),   # at Coquitlam Centre
         store("b", "Close by", 49.2900, -122.7986),               # ~1.1 km north
         store("c", "Far", 49.2000, -123.1000, close="22:00"),     # Vancouver
-    ], date(2026, 10, 29))
+    ])
 
     nearest = db.run_query(conn, "nearest_to_coquitlam_centre")
     assert nearest[0]["name"] == "Near" and nearest[0]["meters"] < 50

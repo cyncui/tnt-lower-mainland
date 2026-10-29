@@ -5,8 +5,8 @@ Postal code is left out on purpose: it is the field most often missing or
 corrected later, and a fix to it should not mint a new store.
 
 What breaks it (a new ID for the same physical store):
-- the brand renames its stores or the address string changes in a way
-  normalize_street doesn't fold (e.g. "No. 3 Rd" vs "Number 3 Road");
+- the address string changes in a way canonical_street doesn't fold
+  (e.g. "No. 3 Rd" vs "Number 3 Road");
 - a unit number is added, removed or corrected;
 - the city changes ("Vancouver" -> "Burnaby" for a border store, or a mall
   listed under its municipality one week and its neighbourhood the next);
@@ -18,7 +18,7 @@ at the same address with no unit, e.g. a supermarket and an express kiosk.
 
 import hashlib
 
-from tnt.address import Address, normalize_street
+from tnt.address import Address, canonical_street
 
 
 def _norm(text: str | None) -> str:
@@ -28,7 +28,7 @@ def _norm(text: str | None) -> str:
 def store_id(brand: str, addr: Address) -> str:
     key = "|".join([
         _norm(brand),
-        normalize_street(addr.street or ""),
+        canonical_street(addr.street).lower() if addr.street else "",
         _norm(addr.unit),
         _norm(addr.city),
         _norm(addr.province),

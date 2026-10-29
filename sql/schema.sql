@@ -9,23 +9,26 @@ CREATE TABLE IF NOT EXISTS store_snapshots (
     PRIMARY KEY (store_id, run_date)
 );
 
+-- Typed columns for querying, plus the full StoreRecord (src/tnt/schema.py)
+-- so the API returns the same shape as the cleaned files.
 CREATE TABLE IF NOT EXISTS stores (
     store_id      text PRIMARY KEY,
     brand         text NOT NULL,
-    name          text,
+    banner        text NOT NULL,
+    name          text NOT NULL,
     street        text,
     unit          text,
     city          text,
     province      text,
     postal_code   text,
-    raw_address   text NOT NULL,
-    raw_hours     text NOT NULL,
-    hours         jsonb NOT NULL,
+    phone         text,
     -- geography, not geometry: distances come back in meters on the spheroid.
     -- Points are (lng, lat); getting that backwards puts Vancouver in Antarctica.
     site_geog     geography(Point, 4326),
+    -- Only building-level geocodes; a street-level match isn't a location.
     geocoded_geog geography(Point, 4326),
     flags         text[] NOT NULL DEFAULT '{}',
+    record        jsonb NOT NULL,
     first_seen    date NOT NULL,
     last_seen     date NOT NULL
 );

@@ -21,6 +21,7 @@ LAT_KEYS = ["lat", "latitude"]
 LNG_KEYS = ["lng", "lon", "long", "longitude"]
 HOURS_KEYS = ["store_hours", "hours", "opening_hours", "business_hours", "schedule"]
 SPECIAL_HOURS_KEYS = ["special_store_hours", "holiday_hours"]
+PHONE_KEYS = ["telephone", "phone", "phone_number"]
 SOURCE_ID_KEYS = ["id", "store_id", "store_code", "code", "identifier"]
 
 
@@ -33,6 +34,7 @@ class RawStore:
     lat: float | None
     lng: float | None
     special_hours: str | None = None
+    phone: str | None = None
 
 
 def _first(d: dict, keys: list[str]):
@@ -89,12 +91,13 @@ def extract(raw_path: Path) -> list[RawStore]:
             address = ", ".join(p.strip() for p in parts if p.strip())
             store = RawStore(
                 source_id=_text(_first(d, SOURCE_ID_KEYS)) or None,
-                name=_text(_first(d, NAME_KEYS)).strip() or None,  # "Lougheed Store "
+                name=_text(_first(d, NAME_KEYS)) or None,
                 address=address,
                 hours=_text(_first(d, HOURS_KEYS)),
                 lat=_float(_first(d, LAT_KEYS)),
                 lng=_float(_first(d, LNG_KEYS)),
                 special_hours=_text(_first(d, SPECIAL_HOURS_KEYS)).strip() or None,
+                phone=_text(_first(d, PHONE_KEYS)).strip() or None,
             )
             # The same store can appear in several captures (page load + search).
             stores[store.source_id or address] = store

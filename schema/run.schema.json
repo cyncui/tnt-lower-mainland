@@ -1,0 +1,375 @@
+{
+  "$defs": {
+    "Address": {
+      "properties": {
+        "street": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Street"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "city": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "City"
+        },
+        "province": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Province"
+        },
+        "postal_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Postal Code"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        }
+      },
+      "title": "Address",
+      "type": "object"
+    },
+    "DayHours": {
+      "properties": {
+        "open": {
+          "pattern": "^\\d{2}:\\d{2}$",
+          "title": "Open",
+          "type": "string"
+        },
+        "close": {
+          "pattern": "^\\d{2}:\\d{2}$",
+          "title": "Close",
+          "type": "string"
+        }
+      },
+      "required": [
+        "open",
+        "close"
+      ],
+      "title": "DayHours",
+      "type": "object"
+    },
+    "Geocode": {
+      "properties": {
+        "lat": {
+          "maximum": 90,
+          "minimum": -90,
+          "title": "Lat",
+          "type": "number"
+        },
+        "lng": {
+          "maximum": 180,
+          "minimum": -180,
+          "title": "Lng",
+          "type": "number"
+        },
+        "precision": {
+          "enum": [
+            "building",
+            "street"
+          ],
+          "title": "Precision",
+          "type": "string"
+        },
+        "distance_m": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Distance M"
+        },
+        "matched": {
+          "title": "Matched",
+          "type": "string"
+        }
+      },
+      "required": [
+        "lat",
+        "lng",
+        "precision",
+        "matched"
+      ],
+      "title": "Geocode",
+      "type": "object"
+    },
+    "Point": {
+      "properties": {
+        "lat": {
+          "maximum": 90,
+          "minimum": -90,
+          "title": "Lat",
+          "type": "number"
+        },
+        "lng": {
+          "maximum": 180,
+          "minimum": -180,
+          "title": "Lng",
+          "type": "number"
+        }
+      },
+      "required": [
+        "lat",
+        "lng"
+      ],
+      "title": "Point",
+      "type": "object"
+    },
+    "Source": {
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Id"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Name"
+        },
+        "address": {
+          "title": "Address",
+          "type": "string"
+        },
+        "phone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Phone"
+        },
+        "hours": {
+          "title": "Hours",
+          "type": "string"
+        },
+        "special_hours": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Special Hours"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "address",
+        "phone",
+        "hours",
+        "special_hours"
+      ],
+      "title": "Source",
+      "type": "object"
+    },
+    "StoreRecord": {
+      "properties": {
+        "store_id": {
+          "title": "Store Id",
+          "type": "string"
+        },
+        "brand": {
+          "title": "Brand",
+          "type": "string"
+        },
+        "banner": {
+          "title": "Banner",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "address": {
+          "$ref": "#/$defs/Address"
+        },
+        "phone": {
+          "anyOf": [
+            {
+              "pattern": "^\\+1\\d{10}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Phone"
+        },
+        "location": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Point"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "geocode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Geocode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hours": {
+          "additionalProperties": {
+            "$ref": "#/$defs/DayHours"
+          },
+          "propertyNames": {
+            "enum": [
+              "mon",
+              "tue",
+              "wed",
+              "thu",
+              "fri",
+              "sat",
+              "sun"
+            ]
+          },
+          "title": "Hours",
+          "type": "object"
+        },
+        "hours_notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Hours Notes",
+          "type": "array"
+        },
+        "flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Flags",
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        }
+      },
+      "required": [
+        "store_id",
+        "brand",
+        "banner",
+        "name",
+        "address",
+        "location",
+        "geocode",
+        "hours",
+        "hours_notes",
+        "flags",
+        "source"
+      ],
+      "title": "StoreRecord",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "run_date": {
+      "format": "date",
+      "title": "Run Date",
+      "type": "string"
+    },
+    "captured_from": {
+      "title": "Captured From",
+      "type": "string"
+    },
+    "stores": {
+      "items": {
+        "$ref": "#/$defs/StoreRecord"
+      },
+      "title": "Stores",
+      "type": "array"
+    }
+  },
+  "required": [
+    "run_date",
+    "captured_from",
+    "stores"
+  ],
+  "title": "Run",
+  "type": "object"
+}

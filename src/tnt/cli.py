@@ -1,7 +1,6 @@
 """tnt: scrape -> clean -> load -> query T&T stores in the Lower Mainland."""
 
 import argparse
-import json
 import sys
 from datetime import date
 from pathlib import Path
@@ -42,22 +41,23 @@ def cmd_clean(args):
     from tnt.pipeline import run
 
     raw = Path(args.raw) if args.raw else _latest(RAW_DIR)
-    stores = run(raw, None if args.no_geocode else Geocoder())
+    result = run(raw, None if args.no_geocode else Geocoder())
     out = _clean_path(raw)
-    out.write_text(json.dumps([s.as_dict() for s in stores], indent=1, ensure_ascii=False))
-    flagged = [s for s in stores if s.flags]
-    print(f"{len(stores)} Lower Mainland stores -> {out} ({len(flagged)} flagged)")
+    out.write_text(result.model_dump_json(indent=1) + "\n")
+    flagged = [s for s in result.stores if s.flags]
+    print(f"{len(result.stores)} Lower Mainland stores -> {out} ({len(flagged)} flagged)")
     for s in flagged:
-        print(f"  {s.name or s.raw_address}: {', '.join(s.flags)}")
+        print(f"  {s.name}: {', '.join(s.flags)}")
 
 
 def cmd_load(args):
     from tnt import db
+    from tnt.schema import Run
 
     paths = [Path(p) for p in args.files] or sorted(CLEAN_DIR.glob("*.json"))
     with db.connect() as conn:
         for p in paths:
-            db.load(conn, json.loads(p.read_text()), date.fromisoformat(p.stem))
+            db.load(conn, Run.model_validate_json(p.read_text()))
             print(f"loaded {p}")
 
 
@@ -75,8 +75,10 @@ def cmd_query(args):
 def cmd_diff(args):
     from tnt.diff import diff_runs
 
-    before, after = (json.loads(Path(p).read_text()) for p in (args.before, args.after))
-    d = diff_runs(before, after)
+    from tnt.schema import Run
+
+    before, after = (Run.model_validate_json(Path(p).read_text()) for p in (args.before, args.after))
+    d = diff_runs(before.stores, after.stores)
     print(f"added {len(d.added)}, removed {len(d.removed)}, changed {len(d.changed)}")
     for sid in d.added:
         print(f"  + {sid}")
@@ -90,6 +92,14 @@ def cmd_compare_llm(args):
     from tnt.compare import compare
 
     compare(Path(args.clean) if args.clean else None)
+
+
+def cmd_schema(args):
+    import json
+
+    from tnt.schema import Run
+
+    print(json.dumps(Run.model_json_schema(), indent=2))
 
 
 def cmd_serve(args):
@@ -122,6 +132,7 @@ def main():
     s = sub.add_parser("compare-llm", help="regex vs LLM cleaning, side by side")
     s.add_argument("clean", nargs="?")
     s.set_defaults(fn=cmd_compare_llm)
+    sub.add_parser("schema", help="print the JSON Schema for cleaned runs").set_defaults(fn=cmd_schema)
     s = sub.add_parser("serve", help="run the FastAPI app")
     s.add_argument("--port", type=int, default=8000)
     s.set_defaults(fn=cmd_serve)

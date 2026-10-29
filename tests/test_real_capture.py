@@ -60,12 +60,12 @@ def test_split_week_across_crlf_lines():
 
 def test_whole_capture(tmp_path, monkeypatch):
     monkeypatch.setattr(scrape, "RAW_DIR", tmp_path)
-    stores = run(scrape.import_capture(FIXTURE))
+    stores = run(scrape.import_capture(FIXTURE)).stores
     assert len(stores) == 13
     assert all(len(s.hours) == 7 for s in stores)
     assert len({s.store_id for s in stores}) == 13
-    assert [s.name for s in stores if s.flags] == ["Langley Store"]  # no postal code
+    assert [s.name for s in stores if s.flags] == ["Langley"]  # no postal code
 
-    late = {s.name for s in stores if any(close > "22:00" for _, close in s.hours.values())}
+    late = {s.name for s in stores if any(h.close > "22:00" for h in s.hours.values())}
     # Kingsway closes at exactly 22:00, which is not "past" 10 pm.
-    assert late == {"Metrotown Store", "Marine Gateway Store", "Lansdowne Store"}
+    assert late == {"Metrotown", "Marine Gateway", "Lansdowne"}

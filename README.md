@@ -32,13 +32,50 @@ uv run pytest
 |---|---|---|
 | Capture | `scrape.py` | `data/raw/<date>.json`, the untouched JSON responses |
 | Extract | `extract.py` | flat records from wherever the store list sits in the response |
-| Clean | `address.py`, `hours.py` | street, unit, city, province, postal code; `{"mon": ["09:00", "22:00"]}` |
+| Clean | `address.py`, `hours.py`, `pipeline.py` | canonical address, E.164 phone, banner and name, hours by weekday |
 | Identify | `ids.py` | 16-hex SHA-256 of brand + normalized address |
-| Validate | `geocode.py` | flags for missing postal codes and geocodes more than 200 m from T&T's pin |
+| Validate | `geocode.py`, `pipeline.py` | geocode and flags, only for stores that pass the Lower Mainland filter |
 | Load | `db.py`, `sql/` | `store_snapshots` log, `stores` and `store_hours` rebuilt from it |
 | Diff | `diff.py` | added, removed and changed stores between two runs |
 
 Raw data is saved before any parsing, so a parser bug never costs a re-scrape.
+
+## Record structure
+
+Every stage uses one shape, `StoreRecord` in `src/tnt/schema.py`. The cleaned files in `data/clean/`, the `record` column in Postgres and every API response all match it, and Pydantic validates it at each boundary. `schema/run.schema.json` is the same thing as JSON Schema, and a test fails if it falls out of date. A cleaned file is a `Run` with `schema_version`, `run_date`, `captured_from` and `stores`.
+
+```json
+{
+  "store_id": "bc758c3b4e972e3d",
+  "brand": "T&T Supermarket",
+  "banner": "T&T Supermarket",
+  "name": "Coquitlam",
+  "address": {"street": "2929 Barnet Highway", "unit": "2740", "city": "Coquitlam",
+              "province": "BC", "postal_code": "V3B 5R5", "note": null},
+  "phone": "+16049453818",
+  "location": {"lat": 49.2778082, "lng": -122.8083728},
+  "geocode": {"lat": 49.2771258, "lng": -122.7986449, "precision": "building",
+              "distance_m": 710, "matched": "Cactus Club Cafe, 2929, Barnet Highway, ..."},
+  "hours": {"mon": {"open": "09:00", "close": "21:30"}, "...": "...",
+            "sun": {"open": "09:00", "close": "21:00"}},
+  "hours_notes": [],
+  "flags": ["geocode_mismatch_710m"],
+  "source": {"id": "19", "name": "Coquitlam Store",
+             "address": "2740-2929 Barnet Highway  Coquitlam, BC. V3B 5R5",
+             "phone": "604.945.3818",
+             "hours": "Monday – Saturday\r\n9:00 am – 9:30 pm\r\nSunday\r\n9:00 am – 9:00 pm",
+             "special_hours": null}
+}
+```
+
+The rules each field follows:
+
+- `address.street` is one canonical spelling: full words in title case, so `E. First Ave` becomes `East 1st Avenue`, `S.W.` becomes `SW` and `HWY` becomes `Highway`. The same function feeds the display, the store ID and the geocoder, so they can't disagree.
+- `name` is the location only. `Osaka – Park Royal Store` becomes banner `Osaka`, name `Park Royal`. Osaka is T&T's Japanese-format banner.
+- `phone` is E.164. T&T writes both `604.945.3818` and `604-519-8678`.
+- `hours` keys are always in week order, Monday first, whatever order the source used.
+- `location` is T&T's own pin. `geocode` is Nominatim's, with `precision` and the distance between the two.
+- `source` keeps every string exactly as published, so a parser fix can be re-run from the record alone.
 
 ## What was messy
 
@@ -109,7 +146,7 @@ The postal code pattern rejects D, F, I, O, Q and U, which Canada Post never use
 
 The ID hashes brand, normalized street, unit, city and province. The postal code is left out because it's the field most often missing or corrected later, and fixing it shouldn't create a new store. T&T's own `id` field is kept as `source_id`, but it's the brand's internal key and could change with a site rebuild. A store gets a new ID when:
 
-- the address text changes in a way `normalize_street` doesn't fold, such as "E. First Ave" vs "East 1st Avenue";
+- the address text changes in a way `canonical_street` doesn't fold, such as "No. 3 Rd" vs "Number 3 Road";
 - a unit number is added, removed or corrected;
 - the listed city changes, for example "Township of Langley" becoming "Langley";
 - the store moves to another unit in the same mall.
@@ -124,6 +161,7 @@ The reverse failure is two stores sharing one ID, such as a supermarket and a ki
 
 I built this with Claude Code and reviewed each diff. These were the bugs it wrote or nearly wrote:
 
+- The first version of the shared schema geocoded every store before the Lower Mainland filter, sending Nominatim requests for stores it then dropped. A comment justified it as "simpler". Cleaning and validation are now separate steps with the filter between them.
 - The address parser collapsed whitespace before parsing, which erased T&T's double-space separator between street and city.
 - The unit pattern was lazy with a digit lookahead, which would have read `#3000-10153` as unit "3".
 - It filtered captures on "graphql" in the URL, an assumption the real site didn't match.
@@ -131,7 +169,7 @@ I built this with Claude Code and reviewed each diff. These were the bugs it wro
 - It wrote the Coquitlam Centre coordinates from memory and they were about 320 m off. They now come from Nominatim, with the date in a comment.
 - The Lower Mainland fallback accepted any postal code starting with V, which also covers Victoria and Kelowna.
 - A HAR import read `content.text` as JSON directly, but DevTools base64-encodes some bodies.
-- A test named "keeps St in saint names" didn't test that case. `100 St Johns St` normalizes to `100 street johns street`. It's now an `xfail` test that records the gap.
+- A test named "keeps St in saint names" didn't test that case, and `100 St Johns St` came out as `100 street johns street`. "St" now means Saint unless it's the last word or only a direction follows it.
 - `ST_MakePoint` takes longitude first. The schema has a comment about it, and the DB test would catch a swap because the distances would be wrong.
 - The self-join for nearby pairs uses `a.store_id < b.store_id`. With `<>` every pair comes back twice.
 - Distances use `geography`. On `geometry(4326)` the same `ST_DWithin(..., 3000)` would mean 3000 degrees.

@@ -5,14 +5,15 @@ from pathlib import Path
 import pytest
 
 from tnt import scrape
-from tnt.address import Address
+from tnt.address import Address, canonical_street
 from tnt.diff import diff_runs
 from tnt.extract import extract
 from tnt.geocode import GeoResult, geocode_queries, haversine_m, validation_flags
 from tnt.ids import store_id
-from tnt.pipeline import run
+from tnt.pipeline import e164, run, split_name
+from tnt.schema import Run
 
-FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_capture.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "tnt_bc_2026-10-29.json"
 
 
 @pytest.fixture
@@ -21,28 +22,20 @@ def raw(tmp_path, monkeypatch):
     return scrape.import_capture(FIXTURE)
 
 
-def test_extract_finds_nested_store_list(raw):
+def test_extract_reads_the_locator_response(raw):
     stores = extract(raw)
-    assert {s.source_id for s in stores} == {"101", "102", "103", "201"}
-    a = next(s for s in stores if s.source_id == "101")
-    assert a.address == "#100 - 1234 Example Road, Burnaby, BC, V5H 2E1"
-    assert (a.lat, a.lng) == (49.227, -123.0)
+    assert len(stores) == 13
+    coquitlam = next(s for s in stores if s.source_id == "19")
+    assert coquitlam.address == "2740-2929 Barnet Highway  Coquitlam, BC. V3B 5R5"
+    assert (coquitlam.lat, coquitlam.lng) == (49.2778082, -122.8083728)
+    assert coquitlam.phone == "604.945.3818"
 
 
-def test_pipeline_keeps_lower_mainland_and_flags(raw):
-    stores = {s.source_id: s for s in run(raw)}
-    assert set(stores) == {"101", "102", "103"}  # Thornhill is dropped
-    assert stores["101"].unit == "100" and stores["101"].flags == []
-    assert stores["102"].flags == ["missing_postal_code"]
-    assert stores["102"].hours_notes == ["Grand Opening: Oct 8 9am"]
-    assert "hours_unparsed" in stores["103"].flags
-
-
-def test_har_import_decodes_base64_bodies(tmp_path, monkeypatch):
+def test_har_import_keeps_json_and_decodes_base64(tmp_path, monkeypatch):
     monkeypatch.setattr(scrape, "RAW_DIR", tmp_path / "raw")
     body = base64.b64encode(FIXTURE.read_bytes()).decode()
     har = {"log": {"entries": [
-        {"request": {"url": "https://www.tntsupermarket.com/stores", "postData": {"text": "{}"}},
+        {"request": {"url": "https://www.tntsupermarket.com/stores"},
          "response": {"status": 200, "content": {"text": body, "encoding": "base64", "mimeType": "application/json"}}},
         {"request": {"url": "https://maps.googleapis.com/maps/vt"},
          "response": {"status": 200, "content": {"text": "_xdc_._abc && _xdc_._abc([])", "mimeType": "text/javascript"}}},
@@ -51,7 +44,48 @@ def test_har_import_decodes_base64_bodies(tmp_path, monkeypatch):
     har_path.write_text(json.dumps(har))
     saved = scrape.import_capture(har_path)
     assert len(json.loads(saved.read_text())["captures"]) == 1  # the Maps JSONP is skipped
-    assert len(extract(saved)) == 4
+    assert len(extract(saved)) == 13
+
+
+def test_run_round_trips_through_json(raw):
+    result = run(raw)
+    assert Run.model_validate_json(result.model_dump_json()) == result
+
+
+def test_record_shape(raw):
+    parkroyal = next(s for s in run(raw).stores if s.source.id == "17")
+    assert (parkroyal.banner, parkroyal.name) == ("Osaka", "Park Royal")
+    assert parkroyal.address == Address("2200 Park Royal South", None, "West Vancouver", "BC", "V7T 2W4",
+                                        note="Upper Level")
+    assert parkroyal.phone == "+17782798988"
+    assert list(parkroyal.hours) == ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]  # input started on sun
+    assert parkroyal.source.name == "Osaka – Park Royal Store"
+
+
+@pytest.mark.parametrize("raw_name, expected", [
+    ("Osaka – Yaohan Center Store", ("Osaka", "Yaohan Center")),
+    ("Lougheed Store ", ("T&T Supermarket", "Lougheed")),
+    ("Central City Store", ("T&T Supermarket", "Central City")),
+])
+def test_split_name(raw_name, expected):
+    assert split_name(raw_name) == expected
+
+
+@pytest.mark.parametrize("raw_phone, expected", [
+    ("604.945.3818", "+16049453818"),
+    ("604-519-8678", "+16045198678"),
+    ("1 (604) 519-8678", "+16045198678"),
+    ("ext. 12", None),
+])
+def test_e164(raw_phone, expected):
+    assert e164(raw_phone) == expected
+
+
+@pytest.mark.parametrize("street", ["2800 E. First Ave", "458 S.W. Marine Drive", "3700 No. 3 Rd", "100 St Johns St"])
+def test_canonical_street_is_idempotent(street):
+    # Records store the canonical form and the ID canonicalizes again.
+    once = canonical_street(street)
+    assert canonical_street(once) == once
 
 
 def test_store_id_ignores_formatting_and_postal_code():
@@ -80,7 +114,7 @@ def test_flags_geocode_more_than_200m_away():
 
 
 def test_street_level_geocode_is_not_compared():
-    addr = Address("3700 No. 3 Rd", "1000", "Richmond", "BC", "V6X 3X2")
+    addr = Address("3700 No. 3 Road", "1000", "Richmond", "BC", "V6X 3X2")
     # Nominatim's whole-road match for No. 3 Road is 8 km away; that's not a mismatch.
     flags = validation_flags(addr, (49.1863, -123.1333), GeoResult(49.1110, -123.1350, False))
     assert flags == ["geocode_street_level"]
@@ -97,9 +131,12 @@ def test_geocode_queries_match_what_nominatim_accepts(street, city, expected):
     assert geocode_queries(Address(street, "1", city, "BC", "V5M 4N8")) == expected
 
 
-def test_diff_runs():
-    before = [{"store_id": "a", "name": "A"}, {"store_id": "b", "name": "B"}]
-    after = [{"store_id": "b", "name": "B2"}, {"store_id": "c", "name": "C"}]
+def test_diff_runs(raw):
+    stores = run(raw).stores
+    before = stores[:12]
+    renamed = stores[1].model_copy(update={"name": "Renamed"})
+    after = [stores[0], renamed, *stores[2:]]
     d = diff_runs(before, after)
-    assert d.added == ["c"] and d.removed == ["a"]
-    assert d.changed == {"b": {"name": ("B", "B2")}}
+    assert d.added == [stores[12].store_id]
+    assert d.removed == []
+    assert d.changed == {stores[1].store_id: {"name": (stores[1].name, "Renamed")}}

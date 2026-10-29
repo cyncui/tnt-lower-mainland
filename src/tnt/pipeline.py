@@ -1,16 +1,25 @@
-"""Raw capture -> cleaned, ID'd, validated store records (regex cleaner)."""
+"""Raw capture -> validated StoreRecords (regex cleaner).
 
+clean() turns one raw store into a record; validate() geocodes it and sets
+flags. The Lower Mainland filter runs between them so Nominatim is only
+asked about stores we keep.
+"""
+
+import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
-from tnt.address import Address, parse_address
+from tnt.address import canonical_street, parse_address
 from tnt.extract import RawStore, extract
-from tnt.geocode import Geocoder, validation_flags
+from tnt.geocode import Geocoder, haversine_m, validation_flags
 from tnt.hours import parse_hours
 from tnt.ids import store_id
+from tnt.schema import DayHours, Geocode, Point, Run, Source, StoreRecord
 
 BRAND = "T&T Supermarket"
+BANNERS = ["Osaka"]  # T&T's Japanese-format stores, listed as "Osaka – <location> Store"
 
 LOWER_MAINLAND = {
     "vancouver", "burnaby", "richmond", "surrey", "coquitlam", "port coquitlam", "port moody",
@@ -19,41 +28,22 @@ LOWER_MAINLAND = {
 }
 
 
-@dataclass
-class Store:
-    store_id: str
-    brand: str
-    name: str | None
-    source_id: str | None
-    street: str | None
-    unit: str | None
-    city: str | None
-    province: str | None
-    postal_code: str | None
-    note: str | None
-    raw_address: str
-    raw_hours: str
-    hours: dict[str, list[str]]
-    hours_notes: list[str]
-    lat: float | None
-    lng: float | None
-    geocoded_lat: float | None = None
-    geocoded_lng: float | None = None
-    flags: list[str] = field(default_factory=list)
-
-    def as_dict(self) -> dict:
-        return asdict(self)
+def split_name(raw: str | None) -> tuple[str, str]:
+    """'Osaka – Park Royal Store' -> ('Osaka', 'Park Royal'); 'Lougheed Store ' -> (BRAND, 'Lougheed')."""
+    name = " ".join((raw or "").split())
+    banner = BRAND
+    for b in BANNERS:
+        if m := re.match(rf"^{b}\s*[–—-]\s*", name):
+            banner, name = b, name[m.end():]
+    return banner, re.sub(r"\s+store$", "", name, flags=re.IGNORECASE)
 
 
-def clean(raw: RawStore) -> Store:
-    addr = parse_address(raw.address)
-    hours = parse_hours(raw.hours)
-    notes = hours.notes + ([f"special: {raw.special_hours}"] if raw.special_hours else [])
-    return Store(
-        store_id=store_id(BRAND, addr), brand=BRAND, name=raw.name, source_id=raw.source_id,
-        **addr.as_dict(), raw_address=raw.address, raw_hours=raw.hours,
-        hours=hours.hours, hours_notes=notes, lat=raw.lat, lng=raw.lng,
-    )
+def e164(phone: str | None) -> str | None:
+    """'604.945.3818' and '604-519-8678' -> '+16049453818'."""
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 11 and digits[0] == "1":
+        digits = digits[1:]
+    return f"+1{digits}" if len(digits) == 10 else None
 
 
 def _municipality(city: str) -> str:
@@ -61,29 +51,60 @@ def _municipality(city: str) -> str:
     return re.sub(r"^(?:township|city|district|corporation) of ", "", city.lower())
 
 
-def in_lower_mainland(s: Store) -> bool:
-    if s.city and _municipality(s.city) in LOWER_MAINLAND:
+def in_lower_mainland(r: StoreRecord) -> bool:
+    city = r.address.city
+    if city and _municipality(city) in LOWER_MAINLAND:
         return True
     # No city: fall back to the postal code. Every BC code starts with V, so
     # "V" alone would pull in Victoria and Kelowna; V3-V7 is the Lower Mainland
-    # core. Callers flag these for review.
-    return s.city is None and (s.postal_code or "")[:2] in {"V3", "V4", "V5", "V6", "V7"}
+    # core. These get a flag for review.
+    return city is None and (r.address.postal_code or "")[:2] in {"V3", "V4", "V5", "V6", "V7"}
 
 
-def run(raw_path: Path, geocoder: Geocoder | None = None) -> list[Store]:
-    stores = [clean(r) for r in extract(raw_path)]
-    stores = [s for s in stores if in_lower_mainland(s)]
-    for s in stores:
-        addr = Address(s.street, s.unit, s.city, s.province, s.postal_code)  # note not sent to the geocoder
-        site = (s.lat, s.lng) if s.lat is not None and s.lng is not None else None
-        geo = geocoder.geocode(addr) if geocoder else None
-        if geo and geo.precise:
-            s.geocoded_lat, s.geocoded_lng = geo.lat, geo.lng
-        s.flags = validation_flags(addr, site, geo) if geocoder else (
-            [] if s.postal_code else ["missing_postal_code"]
-        )
-        if s.city is None:
-            s.flags.append("lower_mainland_by_postal_code")
-        if any(n.startswith("unparsed") for n in s.hours_notes):
-            s.flags.append("hours_unparsed")
-    return stores
+def clean(raw: RawStore) -> StoreRecord:
+    addr = parse_address(raw.address)
+    if addr.street:
+        addr = replace(addr, street=canonical_street(addr.street))
+    hours = parse_hours(raw.hours)
+    banner, name = split_name(raw.name)
+    flags = []
+    if addr.city is None:
+        flags.append("lower_mainland_by_postal_code")
+    if not hours.hours:
+        flags.append("hours_unparsed")
+    if raw.phone and not e164(raw.phone):
+        flags.append("phone_unparsed")
+    return StoreRecord(
+        store_id=store_id(BRAND, addr), brand=BRAND, banner=banner, name=name, address=addr,
+        phone=e164(raw.phone),
+        location=Point(lat=raw.lat, lng=raw.lng) if raw.lat is not None and raw.lng is not None else None,
+        geocode=None,
+        hours={d: DayHours(open=o, close=c) for d, (o, c) in hours.hours.items()},
+        hours_notes=hours.notes + ([f"special: {raw.special_hours}"] if raw.special_hours else []),
+        flags=flags,
+        source=Source(id=raw.source_id, name=raw.name, address=raw.address, phone=raw.phone,
+                      hours=raw.hours, special_hours=raw.special_hours),
+    )
+
+
+def validate(r: StoreRecord, geocoder: Geocoder | None) -> StoreRecord:
+    site = (r.location.lat, r.location.lng) if r.location else None
+    geo = geocoder.geocode(r.address) if geocoder else None
+    geocode = None
+    if geo:
+        distance = round(haversine_m(*site, geo.lat, geo.lng)) if site and geo.precise else None
+        geocode = Geocode(lat=geo.lat, lng=geo.lng, precision="building" if geo.precise else "street",
+                          distance_m=distance, matched=geo.matched)
+    if geocoder:
+        flags = validation_flags(r.address, site, geo)
+    else:
+        flags = [] if r.address.postal_code else ["missing_postal_code"]
+    return r.model_copy(update={"geocode": geocode, "flags": flags + r.flags})
+
+
+def run(raw_path: Path, geocoder: Geocoder | None = None) -> Run:
+    raw = json.loads(raw_path.read_text())
+    records = [clean(r) for r in extract(raw_path)]
+    kept = [validate(r, geocoder) for r in records if in_lower_mainland(r)]
+    kept.sort(key=lambda r: (r.address.city or "", r.name))
+    return Run(run_date=date.fromisoformat(raw_path.stem), captured_from=raw["source"], stores=kept)

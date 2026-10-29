@@ -1,10 +1,10 @@
 """Regex vs LLM cleaning on the same inputs."""
 
-import json
 from pathlib import Path
 
 from tnt.address import parse_address
 from tnt.hours import parse_hours
+from tnt.schema import Run
 
 # Messy strings seen on tntsupermarket.com, kept so the comparison runs
 # even before a full capture exists. The address/hours pairings are
@@ -23,7 +23,8 @@ def compare(clean_path: Path | None) -> None:
 
     pairs = list(KNOWN_MESSY)
     if clean_path:
-        pairs += [(r["raw_address"], r["raw_hours"]) for r in json.loads(clean_path.read_text())]
+        run = Run.model_validate_json(clean_path.read_text())
+        pairs += [(r.source.address, r.source.hours) for r in run.stores]
 
     disagreements = 0
     for address, hours in pairs:

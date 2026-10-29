@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from tnt.address import SUFFIXES, Address
+from tnt.address import Address, canonical_street
 
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 USER_AGENT = "tnt-lower-mainland/0.1 (portfolio project; github.com/cyncui/tnt-lower-mainland)"
@@ -29,33 +29,16 @@ def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
-_ORDINAL_WORDS = {"first": "1st", "second": "2nd", "third": "3rd", "fourth": "4th", "fifth": "5th",
-                  "sixth": "6th", "seventh": "7th", "eighth": "8th", "ninth": "9th", "tenth": "10th"}
-_DIRECTION_WORDS = {"e": "East", "w": "West", "n": "North", "s": "South",
-                    "sw": "SW", "se": "SE", "nw": "NW", "ne": "NE"}
-
-
 def geocode_queries(addr: Address) -> list[str]:
     """Spellings to try, most specific first.
 
-    Tested against Nominatim on the real T&T addresses:
-    "2800 E. First Ave" only matches as "2800 East 1st Avenue", and Surrey's
-    "15277 100th Ave" only as "15277 100 Avenue". The unit and postal code
-    are left out: Nominatim matches civic numbers, not mall units.
+    Tested against Nominatim on the real T&T addresses: the canonical street
+    ("2800 East 1st Avenue") matches where the raw one ("2800 E. First Ave")
+    falls back to the wrong road, and Surrey's numbered streets only match
+    without the ordinal ("15277 100 Avenue"). The unit and postal code are
+    left out: Nominatim matches civic numbers, not mall units.
     """
-    words = []
-    for w in (addr.street or "").replace(".", " ").split():
-        lw = w.lower()
-        if lw in _DIRECTION_WORDS and words:  # never the civic number
-            words.append(_DIRECTION_WORDS[lw])
-        elif lw in _ORDINAL_WORDS:
-            words.append(_ORDINAL_WORDS[lw])
-        elif lw in SUFFIXES and words:
-            words.append(SUFFIXES[lw].title())
-        else:
-            words.append(w)
-    # "S W Marine" (from "S.W.") -> "SW Marine"
-    street = re.sub(r"\b(South|North) (East|West)\b", lambda m: m.group(1)[0] + m.group(2)[0], " ".join(words))
+    street = canonical_street(addr.street or "")
     tail = [p for p in [addr.city, addr.province, "Canada"] if p]
     first = ", ".join([street, *tail])
     no_ordinal = ", ".join([re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", r"\1", street), *tail])
@@ -69,6 +52,7 @@ class GeoResult:
     # place_rank 30 is a building or point of interest; 26-27 is a whole
     # street, which Nominatim returns when it can't find the house number.
     precise: bool
+    matched: str = ""
 
 
 class Geocoder:
@@ -103,9 +87,9 @@ class Geocoder:
         for query in geocode_queries(addr):
             hit = self._lookup(query)
             if hit and hit["rank"] >= 30:
-                return GeoResult(hit["lat"], hit["lng"], precise=True)
+                return GeoResult(hit["lat"], hit["lng"], precise=True, matched=hit["name"])
             fallback = fallback or hit
-        return GeoResult(fallback["lat"], fallback["lng"], precise=False) if fallback else None
+        return GeoResult(fallback["lat"], fallback["lng"], False, fallback["name"]) if fallback else None
 
 
 def validation_flags(addr: Address, site: tuple[float, float] | None, geocoded: GeoResult | None) -> list[str]:
