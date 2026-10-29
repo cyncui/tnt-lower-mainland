@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from tnt import scrape
+from dataclasses import replace
+
 from tnt.address import Address, canonical_street
 from tnt.diff import diff_runs
 from tnt.extract import extract
@@ -81,23 +83,37 @@ def test_e164(raw_phone, expected):
     assert e164(raw_phone) == expected
 
 
-@pytest.mark.parametrize("street", ["2800 E. First Ave", "458 S.W. Marine Drive", "3700 No. 3 Rd", "100 St Johns St"])
+@pytest.mark.parametrize("street", ["2800 E. First Ave", "458 S.W. Marine Drive", "3700 No. 3 Rd", "100 St Johns St",
+                                    "100 No First", "100 Main St NE", "3700 Number 3 Road"])
 def test_canonical_street_is_idempotent(street):
     # Records store the canonical form and the ID canonicalizes again.
     once = canonical_street(street)
     assert canonical_street(once) == once
 
 
-def test_store_id_ignores_formatting_and_postal_code():
-    a = Address("1800 Sheppard Ave. E", "1115", "Toronto", "ON", "M2J 5A7")
-    b = Address("1800 sheppard avenue east", "1115", "TORONTO", "ON", None)
-    assert store_id("T&T Supermarket", a) == store_id("T&T Supermarket", b)
+T = "T&T Supermarket"
 
 
-def test_store_id_changes_with_unit():
-    a = Address("1800 Sheppard Avenue East", "1115", "Toronto", "ON", None)
-    b = Address("1800 Sheppard Avenue East", "1116", "Toronto", "ON", None)
-    assert store_id("T&T Supermarket", a) != store_id("T&T Supermarket", b)
+@pytest.mark.parametrize("a, b", [
+    (Address("1800 Sheppard Ave. E", "1115", "Toronto", "ON", "M2J 5A7"),
+     Address("1800 sheppard avenue east", "1115", "TORONTO", "ON", None)),
+    (Address("3700 No. 3 Rd", "1000", "Richmond", "BC"), Address("3700 Number 3 Road", "1000", "Richmond", "BC")),
+    (Address("458 SW Marine Drive", None, "Vancouver", "BC"), Address("458 Southwest Marine Dr", None, "Vancouver", "BC")),
+    (Address("15277 100th Ave", "101T", "Surrey", "BC"), Address("15277 100 Avenue", "101-T", "Surrey", "BC")),
+    (Address("4800 Kingsway", "0147", "Burnaby", "BC"), Address("4800 Kingsway", "147", "Burnaby", "BC")),
+    (Address("19705 Fraser Hwy", "100", "Township of Langley", "BC"),
+     Address("19705 Fraser Highway", "100", "Langley", "BC")),
+    (Address("1 Lonsdale Ave", None, "N. Vancouver", "BC"), Address("1 Lonsdale Avenue", None, "North Vancouver", "BC")),
+])
+def test_store_id_ignores_formatting(a, b):
+    assert store_id(T, T, a) == store_id(T, T, b)
+
+
+def test_store_id_separates_units_banners_and_floors():
+    base = Address("2200 Park Royal South", None, "West Vancouver", "BC", note="Upper Level")
+    assert store_id(T, T, base) != store_id(T, T, replace(base, unit="1"))
+    assert store_id(T, T, base) != store_id(T, "Osaka", base)
+    assert store_id(T, T, base) != store_id(T, T, replace(base, note="Lower Level"))
 
 
 def test_haversine_known_distance():

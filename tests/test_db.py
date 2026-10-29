@@ -52,6 +52,23 @@ def test_first_and_last_seen_survive_out_of_order_loads(conn):
             conn.execute("SELECT store_id, first_seen, last_seen FROM stores").fetchall()}
     assert rows["a"] == (date(2026, 10, 29), date(2026, 11, 5))
     assert rows["b"] == (date(2026, 10, 29), date(2026, 10, 29))  # gone in the later run
+    active = dict(conn.execute("SELECT store_id, active FROM stores").fetchall())
+    assert active == {"a": True, "b": False}
+
+
+def test_reloading_a_day_replaces_it(conn):
+    load(conn, date(2026, 10, 29), [store("old-id", "A", 49.25, -123.0)])
+    load(conn, date(2026, 10, 29), [store("new-id", "A", 49.25, -123.0)])
+    assert conn.execute("SELECT store_id FROM store_snapshots").fetchall() == [("new-id",)]
+
+
+def test_closed_stores_drop_out_of_queries(conn):
+    load(conn, date(2026, 10, 29), [store("a", "Near", 49.2798, -122.7986, close="23:00"),
+                                    store("b", "Close by", 49.2900, -122.7986)])
+    load(conn, date(2026, 11, 5), [store("b", "Close by", 49.2900, -122.7986)])  # "Near" closed
+    assert db.run_query(conn, "nearest_to_coquitlam_centre")[0]["name"] == "Close by"
+    assert db.run_query(conn, "stores_within_3km") == []
+    assert db.run_query(conn, "open_past_10pm") == []
 
 
 def test_queries_use_meters_and_list_pairs_once(conn):

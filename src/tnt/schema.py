@@ -7,7 +7,7 @@ them sit under `source`, so a parser fix can always be re-run from them.
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from tnt.address import Address
 from tnt.hours import DAYS
@@ -59,6 +59,9 @@ class Inferred(BaseModel):
 
 class StoreRecord(BaseModel):
     store_id: str
+    # How this ID was decided: carried over from an earlier run by the brand's
+    # store number or its map pin, or minted from the address hash (resolve.py).
+    matched_by: Literal["store_number", "pin", "new"] = "new"
     brand: str
     banner: str  # "T&T Supermarket" or "Osaka"
     name: str  # location only: "Park Royal", not "Osaka – Park Royal Store"
@@ -78,8 +81,33 @@ class StoreRecord(BaseModel):
         return {d: v[d] for d in DAYS if d in v}
 
 
+class Excluded(BaseModel):
+    """A store in the capture that didn't make the run. Listed so a parse
+    failure can't look like a closure."""
+
+    source_id: str | None
+    name: str | None
+    city: str | None
+    reason: str
+
+
 class Run(BaseModel):
     schema_version: Literal[1] = SCHEMA_VERSION
     run_date: date
     captured_from: str
     stores: list[StoreRecord]
+    excluded: list[Excluded] = []
+
+    @model_validator(mode="after")
+    def unique_ids(self) -> "Run":
+        # Two stores with one ID would silently overwrite each other in the
+        # database and the diff, so refuse the run instead.
+        seen: dict[str, str] = {}
+        dupes = []
+        for s in self.stores:
+            if s.store_id in seen:
+                dupes.append(f"{s.store_id} ({seen[s.store_id]} / {s.name})")
+            seen[s.store_id] = s.name
+        if dupes:
+            raise ValueError(f"duplicate store IDs: {', '.join(dupes)}")
+        return self

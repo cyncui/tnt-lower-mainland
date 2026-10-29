@@ -73,6 +73,13 @@
           ],
           "default": null,
           "title": "Note"
+        },
+        "issues": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Issues",
+          "type": "array"
         }
       },
       "title": "Address",
@@ -96,6 +103,56 @@
         "close"
       ],
       "title": "DayHours",
+      "type": "object"
+    },
+    "Excluded": {
+      "description": "A store in the capture that didn't make the run. Listed so a parse\nfailure can't look like a closure.",
+      "properties": {
+        "source_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Id"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Name"
+        },
+        "city": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "City"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "name",
+        "city",
+        "reason"
+      ],
+      "title": "Excluded",
       "type": "object"
     },
     "Geocode": {
@@ -284,6 +341,16 @@
           "title": "Store Id",
           "type": "string"
         },
+        "matched_by": {
+          "default": "new",
+          "enum": [
+            "store_number",
+            "pin",
+            "new"
+          ],
+          "title": "Matched By",
+          "type": "string"
+        },
         "brand": {
           "title": "Brand",
           "type": "string"
@@ -414,6 +481,14 @@
         "$ref": "#/$defs/StoreRecord"
       },
       "title": "Stores",
+      "type": "array"
+    },
+    "excluded": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Excluded"
+      },
+      "title": "Excluded",
       "type": "array"
     }
   },

@@ -32,10 +32,12 @@ def _hm(text: str) -> int:
 def load(conn: psycopg.Connection, run: Run) -> None:
     init(conn)
     with conn.transaction():
+        # A run replaces everything stored for its date. Upserting per store
+        # would leave rows behind when re-cleaning a day changes its IDs.
+        conn.execute("DELETE FROM store_snapshots WHERE run_date = %s", (run.run_date,))
         for r in run.stores:
             conn.execute(
-                """INSERT INTO store_snapshots (store_id, run_date, record) VALUES (%s, %s, %s)
-                   ON CONFLICT (store_id, run_date) DO UPDATE SET record = EXCLUDED.record""",
+                "INSERT INTO store_snapshots (store_id, run_date, record) VALUES (%s, %s, %s)",
                 (r.store_id, run.run_date, r.model_dump_json()),
             )
         rebuild(conn)
@@ -61,7 +63,8 @@ def rebuild(conn: psycopg.Connection) -> None:
                CASE WHEN r->'geocode'->>'precision' = 'building'
                     THEN ST_MakePoint((r->'geocode'->>'lng')::float8, (r->'geocode'->>'lat')::float8)::geography END,
                ARRAY(SELECT jsonb_array_elements_text(r->'flags')),
-               r, s.first_seen, s.last_seen
+               r, s.first_seen, s.last_seen,
+               s.last_seen = (SELECT max(run_date) FROM store_snapshots)
         FROM latest l JOIN seen s USING (store_id)
         """
     )

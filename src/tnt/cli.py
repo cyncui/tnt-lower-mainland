@@ -39,15 +39,23 @@ def cmd_import(args):
 def cmd_clean(args):
     from tnt.geocode import Geocoder
     from tnt.pipeline import run
+    from tnt.resolve import latest_records
+    from tnt.schema import Run
 
     raw = Path(args.raw) if args.raw else _latest(RAW_DIR)
-    result = run(raw, None if args.no_geocode else Geocoder())
+    # Earlier runs only: re-cleaning a day shouldn't depend on its own last output.
+    earlier = [Run.model_validate_json(p.read_text()) for p in sorted(CLEAN_DIR.glob("*.json")) if p.stem < raw.stem]
+    result = run(raw, None if args.no_geocode else Geocoder(), latest_records(earlier))
     out = _clean_path(raw)
     out.write_text(result.model_dump_json(indent=1) + "\n")
     flagged = [s for s in result.stores if s.flags]
-    print(f"{len(result.stores)} Lower Mainland stores -> {out} ({len(flagged)} flagged)")
+    kept_ids = sum(s.matched_by != "new" for s in result.stores)
+    print(f"{len(result.stores)} Lower Mainland stores -> {out} ({len(flagged)} flagged, "
+          f"{kept_ids} kept their ID from {len(earlier)} earlier run(s))")
     for s in flagged:
         print(f"  {s.name}: {', '.join(s.flags)}")
+    for e in result.excluded:
+        print(f"  excluded {e.name} ({e.city}): {e.reason}")
 
 
 def cmd_load(args):

@@ -35,25 +35,26 @@ uv run pytest
 | Capture | `scrape.py` | `data/raw/<date>.json`, the untouched JSON responses |
 | Extract | `extract.py` | flat records from wherever the store list sits in the response |
 | Clean | `address.py`, `hours.py`, `pipeline.py` | canonical address, E.164 phone, banner and name, hours by weekday |
-| Identify | `ids.py` | 16-hex SHA-256 of brand + normalized address |
+| Identify | `resolve.py`, `ids.py` | the store's ID from an earlier run if it matches one, else a new 16-hex hash |
 | Validate | `geocode.py`, `pipeline.py` | geocode and flags, only for stores that pass the Lower Mainland filter |
-| Load | `db.py`, `sql/` | `store_snapshots` log, `stores` and `store_hours` rebuilt from it |
+| Load | `db.py`, `sql/` | `store_snapshots` log (a run replaces its date), `stores` and `store_hours` rebuilt from it |
 | Diff | `diff.py` | added, removed and changed stores between two runs |
 
 Raw data is saved before any parsing, so a parser bug never costs a re-scrape.
 
 ## Record structure
 
-Every stage uses one shape, `StoreRecord` in `src/tnt/schema.py`. The cleaned files in `data/clean/`, the `record` column in Postgres and every API response all match it, and Pydantic validates it at each boundary. `schema/run.schema.json` is the same thing as JSON Schema, and a test fails if it falls out of date. A cleaned file is a `Run` with `schema_version`, `run_date`, `captured_from` and `stores`.
+Every stage uses one shape, `StoreRecord` in `src/tnt/schema.py`. The cleaned files in `data/clean/`, the `record` column in Postgres and every API response all match it, and Pydantic validates it at each boundary. `schema/run.schema.json` is the same thing as JSON Schema, and a test fails if it falls out of date. A cleaned file is a `Run` with `schema_version`, `run_date`, `captured_from`, `stores`, and `excluded`, which lists every store in the capture that didn't make the run and why, so a parse failure can't pass for a closure. A `Run` with two stores sharing an ID fails validation instead of loading.
 
 ```json
 {
-  "store_id": "bc758c3b4e972e3d",
+  "store_id": "859a6d5e5a855eb4",
+  "matched_by": "new",
   "brand": "T&T Supermarket",
   "banner": "T&T Supermarket",
   "name": "Coquitlam",
   "address": {"street": "2929 Barnet Highway", "unit": "2740", "city": "Coquitlam",
-              "province": "BC", "postal_code": "V3B 5R5", "note": null},
+              "province": "BC", "postal_code": "V3B 5R5", "note": null, "issues": []},
   "phone": "+16049453818",
   "location": {"lat": 49.2778082, "lng": -122.8083728},
   "geocode": {"lat": 49.2771258, "lng": -122.7986449, "precision": "building",
@@ -134,6 +135,7 @@ All other flags:
 | `missing_postal_code` | no postal code from the brand, and none could be inferred |
 | `postal_code_inferred` | the postal code came from OpenStreetMap, not the brand; details in `inferred` |
 | `postal_code_ambiguous` | OSM had several postal codes at the address and none named for the store; candidates in `inferred` |
+| `postal_code_invalid` | the brand's postal code was malformed (`V5N 2TO`); it was removed and recorded in `address.issues` |
 | `missing_site_coordinates` | the brand's record has no lat/lng |
 | `hours_unparsed` | no weekly hours could be read; the raw text is kept |
 | `lower_mainland_by_postal_code` | no city, included because the postal code starts with V3 to V7 |
@@ -168,23 +170,44 @@ Kingsway closes at exactly 22:00 and isn't included. I checked each answer again
 
 ## Store IDs and what breaks them
 
-The ID hashes brand, normalized street, unit, city and province. The postal code is left out because it's the field most often missing or corrected later, and fixing it shouldn't create a new store. T&T's own `id` field is kept as `source_id`, but it's the brand's internal key and could change with a site rebuild. A store gets a new ID when:
+A store keeps the ID it had in earlier runs. `resolve.py` matches each new record against the latest record of every store from earlier runs, in this order:
 
-- the address text changes in a way `canonical_street` doesn't fold, such as "No. 3 Rd" vs "Number 3 Road";
-- a unit number is added, removed or corrected;
-- the listed city changes, for example "Township of Langley" becoming "Langley";
-- the store moves to another unit in the same mall.
+1. Same brand and the brand's own store number (T&T's `id`, kept as `source.id`).
+2. Otherwise same brand and banner, with T&T's map pin within 50 m, and exactly one earlier store that close.
 
-The reverse failure is two stores sharing one ID, such as a supermarket and a kiosk at one address with no unit. A production system would match new records to existing IDs by distance and name similarity before minting a new one, and keep the hash as a fallback.
+Each earlier store can be matched once. `matched_by` on every record says which rule decided its ID: `store_number`, `pin`, or `new`.
+
+Only stores that match nothing get a new ID, a 16-hex SHA-256 of brand, banner, street, unit, city, province and the address note. Each part is normalized first, so "E. First Ave" and "East 1st Avenue", "100th" and "100", "0147" and "147", "101-T" and "101T", and "Township of Langley" and "Langley" all hash the same. The postal code isn't hashed.
+
+I tested this against the old IDs. The first cleaned file was made by an earlier version of the ID code. I cleaned the same capture again as a pretend second week, using the current code. All 13 stores kept their old IDs through the store-number rule, and the diff showed nothing added, removed or changed, even though the current hash formula gives every store a different value.
+
+What still gives a store a new ID:
+
+- a new brand store number and a pin that moved more than 50 m, which is a relocation or a site rebuild that also moved the pins;
+- a pin match that's ambiguous, with two earlier stores within 50 m;
+- the first run after the hash formula changes, when there's no earlier run to match. That happened once here, to all 13 stores on 2026-10-29, before any history existed.
+
+What would make two stores share an ID: the same brand, banner, street, unit, city, province and note. The banner and note are in the hash so an Osaka and a T&T at one address, or stores on different floors of one mall, stay apart. If a collision happens anyway, the run fails validation instead of one store silently overwriting the other.
+
+A malformed postal code like `V5N 2TO` used to end up as the city, which changed the ID and dropped the store from the run. The parser now removes it, records it in `address.issues`, and flags `postal_code_invalid`.
 
 ## First seen and last seen
 
-`store_snapshots` gets one row per store per scrape and is never updated in place. `stores.first_seen` and `last_seen` are the min and max `run_date` for each ID, recomputed on every load. Loading runs out of order or re-loading a day gives the same answer. `tnt diff data/clean/A.json data/clean/B.json` lists what changed between two runs.
+`store_snapshots` gets one row per store per run. Loading a date replaces everything stored for that date, so re-cleaning a day with different IDs leaves nothing behind. `stores.first_seen` and `last_seen` are the min and max `run_date` for each ID, recomputed on every load, and `active` means the store was in the most recent run. The queries and the API's `/stores` only show active stores. `/stores?include_closed=true` shows all of them, and `/stores/{id}` still answers for a closed store, with `active: false`, so an old reference doesn't break. `tnt diff data/clean/A.json data/clean/B.json` lists what changed between two runs.
 
 ## Bugs caught while building it
 
 I built this with Claude Code and reviewed each diff. These were the bugs it wrote or nearly wrote:
 
+- A read-only review of the ID code found several more problems:
+  - a malformed postal code became the city and dropped the store;
+  - two floors of one mall shared an ID, and any duplicate silently overwrote the other store in the database;
+  - every parser fix re-keyed stores;
+  - re-cleaning a day added a second set of rows instead of replacing the first;
+  - `canonical_street` wasn't idempotent for "No First";
+  - "Main St NE" became "Main Saint NE".
+
+  All are fixed and tested.
 - The first version of the shared schema geocoded every store before the Lower Mainland filter, sending Nominatim requests for stores it then dropped. A comment justified it as "simpler". Cleaning and validation are now separate steps with the filter between them.
 - The address parser collapsed whitespace before parsing, which erased T&T's double-space separator between street and city.
 - The unit pattern was lazy with a digit lookahead, which would have read `#3000-10153` as unit "3".
@@ -206,5 +229,5 @@ ChainXY tracks about 6 million locations across more than 8,000 brands. Most of 
 - Capture: one adapter per brand behind a common output schema, per-domain rate limits, and data agreements or official feeds for sites that refuse automated clients.
 - Parsing: regex first, because it's cheap and deterministic, and an LLM only for the records regex can't parse. Every LLM output gets validated against a schema, and its disagreements with regex go to human review. Those reviewed cases become test fixtures, the way the T&T capture did here.
 - Geocoding: self-hosted Nominatim or a paid geocoder, since the public one allows 1 request per second. Street-level and shared-address matches (malls) need their own handling, because they produced most of the false flags here.
-- Identity: match by distance and name before hashing, so a corrected address keeps its ID.
+- Identity: this repo matches by brand store number, then by pin within 50 m, before hashing. At 8,000 brands that needs name similarity for brands without stable store numbers, a review queue for ambiguous matches, and a way to merge two IDs a person decides are the same store.
 - Change tracking: an incremental merge keyed on `(store_id, run_date)` instead of rebuilding `stores` on each load, with an alert when a brand's store count moves more than expected between runs, since that usually means the scraper broke and not that stores closed.

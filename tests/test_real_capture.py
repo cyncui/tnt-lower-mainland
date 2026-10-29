@@ -64,6 +64,7 @@ def test_whole_capture(tmp_path, monkeypatch):
     assert len(stores) == 13
     assert all(len(s.hours) == 7 for s in stores)
     assert len({s.store_id for s in stores}) == 13
+    assert all(s.matched_by == "new" for s in stores)  # no earlier run
     assert [s.name for s in stores if s.flags] == ["Langley"]  # no postal code
 
     late = {s.name for s in stores if any(h.close > "22:00" for h in s.hours.values())}

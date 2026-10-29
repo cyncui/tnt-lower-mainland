@@ -31,6 +31,32 @@ def test_parse_address(raw, expected):
     assert parse_address(raw) == expected
 
 
+@pytest.mark.parametrize("raw", [
+    "2206 Kingsway  Vancouver, BC. V5N 2TO",   # letter O, not zero
+    "2206 Kingsway  Vancouver, BC. V5N2T",     # truncated
+])
+def test_malformed_postal_code_is_removed_not_parsed_as_city(raw):
+    addr = parse_address(raw)
+    assert (addr.street, addr.city, addr.province, addr.postal_code) == ("2206 Kingsway", "Vancouver", "BC", None)
+    assert addr.issues and addr.issues[0].startswith("invalid postal code")
+
+
+@pytest.mark.parametrize("raw", [
+    "2206 Kingsway  Vancouver, BC. V5N-2T7",
+    "2206 Kingsway, Vancouver, B.C. V5N 2T7",
+    "2206 Kingsway, Vancouver, BC V5N 2T7, Canada",
+])
+def test_postal_and_province_variants(raw):
+    addr = parse_address(raw)
+    assert (addr.city, addr.province, addr.postal_code) == ("Vancouver", "BC", "V5N 2T7")
+
+
+@pytest.mark.parametrize("raw", ["147–4800 Kingsway  Burnaby, BC. V5H 4J2", "Unit 147 – 4800 Kingsway  Burnaby, BC. V5H 4J2"])
+def test_en_dash_between_unit_and_civic(raw):
+    addr = parse_address(raw)
+    assert (addr.unit, addr.street) == ("147", "4800 Kingsway")
+
+
 def test_postal_code_rejects_letters_canada_post_never_uses():
     # D, F, I, O, Q, U are never valid; a naive [A-Z]\d[A-Z] accepts this.
     assert parse_address("123 Main St, Vancouver, BC D5K 1O2").postal_code is None
@@ -48,6 +74,10 @@ def test_postal_code_rejects_letters_canada_post_never_uses():
     ("26 Edward St", "26 Edward Street"),
     ("100 St Johns St", "100 Saint Johns Street"),
     ("50 Main St E", "50 Main Street East"),
+    ("100 Main St NE", "100 Main Street NE"),
+    ("3700 Number 3 Road", "3700 No. 3 Road"),
+    ("2800 Southwest Marine Dr", "2800 SW Marine Drive"),
+    ("12 Oak Ter", "12 Oak Terrace"),
 ])
 def test_canonical_street(raw, canonical):
     assert canonical_street(raw) == canonical

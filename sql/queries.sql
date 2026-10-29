@@ -3,7 +3,7 @@
 SELECT store_id, name, street, city,
        round(ST_Distance(geog, ST_MakePoint(-122.7986, 49.2798)::geography)) AS meters
 FROM store_locations
-WHERE geog IS NOT NULL
+WHERE geog IS NOT NULL AND active
 ORDER BY geog <-> ST_MakePoint(-122.7986, 49.2798)::geography
 LIMIT 1;
 
@@ -16,6 +16,7 @@ FROM store_locations a
 JOIN store_locations b
   ON a.store_id < b.store_id
  AND ST_DWithin(a.geog, b.geog, 3000)
+WHERE a.active AND b.active
 ORDER BY meters;
 
 -- name: open_past_10pm
@@ -26,6 +27,6 @@ SELECT s.name, s.city,
        to_char(make_interval(mins => h.close_min), 'HH24:MI') AS closes
 FROM stores s
 JOIN store_hours h USING (store_id)
-WHERE h.close_min > 22 * 60
+WHERE h.close_min > 22 * 60 AND s.active
 GROUP BY s.name, s.city, h.close_min
 ORDER BY h.close_min DESC, s.name;

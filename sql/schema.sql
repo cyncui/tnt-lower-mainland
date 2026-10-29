@@ -9,6 +9,11 @@ CREATE TABLE IF NOT EXISTS store_snapshots (
     PRIMARY KEY (store_id, run_date)
 );
 
+-- stores and store_hours hold nothing that isn't in store_snapshots: db.py
+-- rebuilds them on every load. Dropping them here means a column change
+-- applies on the next load without a migration or a volume wipe.
+DROP TABLE IF EXISTS store_hours, stores CASCADE;
+
 -- Typed columns for querying, plus the full StoreRecord (src/tnt/schema.py)
 -- so the API returns the same shape as the cleaned files.
 CREATE TABLE IF NOT EXISTS stores (
@@ -30,7 +35,10 @@ CREATE TABLE IF NOT EXISTS stores (
     flags         text[] NOT NULL DEFAULT '{}',
     record        jsonb NOT NULL,
     first_seen    date NOT NULL,
-    last_seen     date NOT NULL
+    last_seen     date NOT NULL,
+    -- In the most recent run. A store that stops appearing keeps its row and
+    -- history but drops out of the queries and the API's default listing.
+    active        boolean NOT NULL
 );
 
 -- Best available location: the brand's own pin, else our geocode.

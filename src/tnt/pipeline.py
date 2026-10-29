@@ -11,12 +11,13 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
-from tnt.address import POSTAL_RE, Address, canonical_street, parse_address
+from tnt.address import POSTAL_RE, Address, canonical_city, canonical_street, parse_address
 from tnt.extract import RawStore, extract
 from tnt.geocode import FLAG_DISTANCE_M, GeoResult, Geocoder, haversine_m, validation_flags
 from tnt.hours import parse_hours
 from tnt.ids import store_id
-from tnt.schema import DayHours, Geocode, Inferred, Point, Run, Source, StoreRecord
+from tnt.resolve import resolve_ids
+from tnt.schema import DayHours, Excluded, Geocode, Inferred, Point, Run, Source, StoreRecord
 
 BRAND = "T&T Supermarket"
 BANNERS = ["Osaka"]  # T&T's Japanese-format stores, listed as "Osaka – <location> Store"
@@ -46,14 +47,9 @@ def e164(phone: str | None) -> str | None:
     return f"+1{digits}" if len(digits) == 10 else None
 
 
-def _municipality(city: str) -> str:
-    # "Township of Langley" -> "langley"
-    return re.sub(r"^(?:township|city|district|corporation) of ", "", city.lower())
-
-
 def in_lower_mainland(r: StoreRecord) -> bool:
     city = r.address.city
-    if city and _municipality(city) in LOWER_MAINLAND:
+    if city and canonical_city(city).lower() in LOWER_MAINLAND:
         return True
     # No city: fall back to the postal code. Every BC code starts with V, so
     # "V" alone would pull in Victoria and Kelowna; V3-V7 is the Lower Mainland
@@ -74,8 +70,10 @@ def clean(raw: RawStore) -> StoreRecord:
         flags.append("hours_unparsed")
     if raw.phone and not e164(raw.phone):
         flags.append("phone_unparsed")
+    if any(i.startswith("invalid postal code") for i in addr.issues):
+        flags.append("postal_code_invalid")
     return StoreRecord(
-        store_id=store_id(BRAND, addr), brand=BRAND, banner=banner, name=name, address=addr,
+        store_id=store_id(BRAND, banner, addr), brand=BRAND, banner=banner, name=name, address=addr,
         phone=e164(raw.phone),
         location=Point(lat=raw.lat, lng=raw.lng) if raw.lat is not None and raw.lng is not None else None,
         geocode=None,
@@ -156,9 +154,18 @@ def validate(r: StoreRecord, geocoder: Geocoder | None) -> StoreRecord:
                                 "inferred": inferred})
 
 
-def run(raw_path: Path, geocoder: Geocoder | None = None) -> Run:
+def run(raw_path: Path, geocoder: Geocoder | None = None, previous: list[StoreRecord] | None = None) -> Run:
+    """previous: the latest record of each store from earlier runs, so stores
+    keep their IDs (resolve.py)."""
     raw = json.loads(raw_path.read_text())
     records = [clean(r) for r in extract(raw_path)]
     kept = [validate(r, geocoder) for r in records if in_lower_mainland(r)]
+    excluded = [
+        Excluded(source_id=r.source.id, name=r.name, city=r.address.city,
+                 reason="outside the Lower Mainland" if r.address.city else "no city and no Lower Mainland postal code")
+        for r in records if not in_lower_mainland(r)
+    ]
+    kept = resolve_ids(kept, previous or [])
     kept.sort(key=lambda r: (r.address.city or "", r.name))
-    return Run(run_date=date.fromisoformat(raw_path.stem), captured_from=raw["source"], stores=kept)
+    return Run(run_date=date.fromisoformat(raw_path.stem), captured_from=raw["source"], stores=kept,
+               excluded=excluded)
